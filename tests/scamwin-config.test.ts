@@ -23,6 +23,16 @@ test('an unselected or credentialless Trigger backend never reports configured',
   assert.equal(scamwinReadiness({ ...web, SCAMWIN_INVESTIGATION_BACKEND: 'trigger', TRIGGER_SECRET_KEY: 'present' }).configured, true);
 });
 
+test('optional viewer readiness never changes basic app gating or returns its encryption key', () => {
+  const base = { ...web, SCAMWIN_INVESTIGATION_BACKEND: 'vercel' };
+  assert.equal(scamwinReadiness(base).configured, true);
+  const key = 'ab'.repeat(32);
+  const enabled = scamwinReadiness({ ...base, SCAMWIN_LIVE_VIEW_ENABLED: 'true', SCAMWIN_LIVE_VIEW_ENCRYPTION_KEY: key, BROWSERLESS_TOKEN: 'private-browser-token' });
+  assert.equal(enabled.configured, true);
+  assert.equal(enabled.readiness.find(item => item.id === 'live_view')?.status, 'limited');
+  assert.doesNotMatch(JSON.stringify(enabled), new RegExp(`${key}|private-browser-token`));
+});
+
 function checkConfig(values: Record<string, string>) {
   const env: NodeJS.ProcessEnv = { PATH: process.env.PATH, SystemRoot: process.env.SystemRoot, NODE_ENV: 'test', ...values };
   return spawnSync(process.execPath, [resolve('scripts/check-scamwin-config.mjs')], { cwd: tmpdir(), env, encoding: 'utf8' });

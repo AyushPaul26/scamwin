@@ -5,7 +5,7 @@ import { resolve } from "node:path";
 const publisherRoot = fileURLToPath(new URL("../", import.meta.url));
 const sourceRoot = resolve(publisherRoot, "../lib/scamwin");
 const generatedRoot = resolve(publisherRoot, "lib");
-const files = ["publication.ts", "registry.ts", "registry-abi.ts", "registry-normalization.ts", "repository-core.ts", "store.ts", "input.ts", "contracts.ts"];
+const files = ["publication.ts", "registry.ts", "registry-abi.ts", "registry-normalization.ts", "repository-core.ts", "store.ts", "input.ts", "contracts.ts", "live-view-contracts.ts", "progress.ts"];
 await mkdir(generatedRoot, { recursive: true });
 // Only these reviewed pure Node modules are packaged. Never copy env files or app routes.
 for (const file of files) {

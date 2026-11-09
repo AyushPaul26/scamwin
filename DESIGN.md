@@ -78,6 +78,8 @@ Native details expose evidence and native checkboxes express reviewer selection 
 
 ## Do's and Don'ts
 
+The investigation detail uses an inspection desk: one embedded, watch-only Browserless view next to the six-stage progress timeline. The panel opens once the real browser stage starts, preserves a manual collapse, and keeps the same iframe across updates. A live label requires the provider connection event. When collection ends, the same space can display a timestamped captured screenshot. Promise, explicitly selected intention and observed request have separate provenance labels and evidence links. Keep this workspace in the existing charcoal, evidence blue and pink tokens; do not introduce simulated agent activity or a second visual theme.
+
 - Lead with the action being considered and link findings to evidence.
 - Keep risk separate from completeness and always show missing checks.
 - Label synthetic examples before their first result; never portray a fixture as live collection.

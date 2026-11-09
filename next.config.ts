@@ -15,6 +15,15 @@ const nextConfig: NextConfig = {
     "/*": ["./node_modules/playwright-core/browsers.json"],
   },
   devIndicators: false,
+  async headers() {
+    // The inspected site runs remotely; only its watch-only provider viewer is framed.
+    let viewerOrigin = "'none'";
+    try {
+      const provider = new URL(process.env.BROWSERLESS_BASE_URL || 'https://production-sfo.browserless.io');
+      if (provider.protocol === 'https:' && ['production-sfo.browserless.io', 'production-lon.browserless.io', 'production-ams.browserless.io'].includes(provider.hostname) && !provider.port && !provider.username && !provider.password && !provider.search && !provider.hash && provider.pathname === '/') viewerOrigin = provider.origin;
+    } catch { /* Invalid configuration cannot broaden frame permissions. */ }
+    return [{ source: '/checks/:id', headers: [{ key: 'Content-Security-Policy', value: `frame-src ${viewerOrigin}; object-src 'none'; base-uri 'self'` }] }];
+  },
   env: { NEXT_PUBLIC_SENTRY_RELEASE: process.env.SENTRY_RELEASE ?? process.env.RENDER_GIT_COMMIT ?? '', NEXT_PUBLIC_OPENMODS_ENV: process.env.OPENMODS_ENV ?? 'development' },
   experimental: {
     agentFeedback: true,

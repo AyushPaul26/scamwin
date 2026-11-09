@@ -6,6 +6,156 @@ import type { CheckInput, Observation } from "../lib/scamwin/contracts";
 
 const input: CheckInput = { url: "https://example.org/", message: "An offer", promisedBenefit: "Refund", intendedAction: "Receive money", images: [] };
 const makeStore = () => new MemoryStore({ now: () => new Date("2026-11-08T12:00:00.000Z"), initialRoles: [{ ownerId: "reviewer", role: "reviewer" }] });
+
+test("terminal storage paths finish interrupted stages without inventing completed work",async()=>{
+  for(const action of ["queued_cancel","cancel","deadline_read","deadline_admission","deadline_purge","delete","terminal_failed","terminal_canceled","expiry"] as const){
+    let now=new Date("2026-11-08T12:00:00.000Z");const store=new MemoryStore({now:()=>now}),c=await store.createCheck("alice",input,action);
+    const oldFinish="2026-11-08T11:59:59.000Z";
+    let current=c;
+    if(action!=="queued_cancel") current=(await store.updateRun(c.id,1,c.revision,{state:"collecting",stages:[
+      {id:"intake",label:"Intake",status:"completed",finishedAt:oldFinish},
+      {id:"browser",label:"Browser",status:"running",startedAt:c.createdAt},
+      {id:"trust",label:"Trust",status:"pending"},
+    ]}))!;
+    now=new Date("2026-11-08T12:00:03.000Z");
+    if(action==="queued_cancel"||action==="cancel") await store.requestCancel("alice",c.id);
+    if(action.startsWith("deadline")) now=new Date("2026-11-08T12:05:01.000Z");
+    if(action==="deadline_read")await store.getInternalCheck(c.id);
+    if(action==="deadline_admission")await store.createCheck("bob",input,"next");
+    if(action==="deadline_purge")await store.purgeExpired();
+    if(action==="delete")await store.deleteCheck("alice",c.id);
+    if(action==="terminal_failed"||action==="terminal_canceled")await store.updateRun(c.id,1,current.revision,{state:action==="terminal_failed"?"failed":"canceled"});
+    if(action==="expiry"){now=new Date("2026-12-09T12:00:00.000Z");await store.purgeExpired();}
+    const saved=(store as unknown as {checks:Map<string,typeof c>}).checks.get(c.id)!;
+    assert.ok(saved.stages.every(s=>!["pending","running"].includes(s.status)),action);
+    if(action==="queued_cancel"){assert.ok(saved.stages.every(s=>s.status==="skipped"&&!s.startedAt&&!s.finishedAt));continue;}
+    assert.equal(saved.stages[0].status,"completed",action);assert.equal(saved.stages[0].finishedAt,oldFinish,action);
+    assert.equal(saved.stages[1].status,action.startsWith("deadline")||action==="terminal_failed"?"unavailable":"canceled",action);
+    assert.equal(saved.stages[1].finishedAt,now.toISOString(),action);assert.equal(saved.stages[2].status,"skipped",action);assert.equal(saved.stages[2].finishedAt,undefined,action);
+  }
+});
+
+test("live sessions enforce owner, run, browser activity, session identity and irreversible end", async () => {
+  const store = makeStore(), c = await store.createCheck("alice", input, "live");
+  const scope = { ownerId: "alice", checkId: c.id, runId: c.runId, generation: c.generation };
+  const record = { sessionId: "session", scope, status: "ready" as const, encryptedLocator: "sealed", createdAt: c.createdAt, expiresAt: "2026-11-08T12:00:30.000Z" };
+  assert.equal(await store.putLiveView(scope, record), false);
+  const collecting = await store.updateRun(c.id, 1, c.revision, { state: "collecting", stages: [{ id: "browser", label: "Browser", status: "running" }] });
+  assert.ok(collecting);
+  assert.equal(await store.putLiveView({ ...scope, runId: "stale" }, { ...record, scope: { ...scope, runId: "stale" } }), false);
+  assert.equal(await store.putLiveView(scope, record), true);
+  assert.equal(await store.putLiveView(scope, { ...record, sessionId: "replacement" }), false);
+  assert.equal(await store.getLiveView("bob", c.id, scope), null);
+  assert.equal(await store.getLiveView("alice", c.id, { ...scope, generation: 2 }), null);
+  assert.equal((await store.getLiveView("alice", c.id, scope))?.encryptedLocator, "sealed");
+  assert.equal(await store.updateLiveView(scope, "old-session", { status: "ended" }), false);
+  assert.equal(await store.updateLiveView(scope, "session", { status: "connected" }), true);
+  assert.equal(await store.updateLiveView(scope, "session", { status: "ended", reasonCode: "collection_ended" }), true);
+  const ended = await store.getLiveView("alice", c.id, scope);
+  assert.equal(ended?.status, "ended"); assert.equal(ended?.encryptedLocator, null);
+  assert.equal(await store.updateLiveView(scope, "session", { status: "connected" }), false);
+  assert.equal(await store.putLiveView(scope, record), false);
+  assert.equal(JSON.stringify(await store.getCheck("alice", c.id)).includes("sealed"), false);
+});
+
+test("initial unavailable live sessions are bounded, secret-free and fenced like ready sessions", async () => {
+  const store = makeStore(), c = await store.createCheck("alice", input, "unavailable");
+  const scope = { ownerId: "alice", checkId: c.id, runId: c.runId, generation: 1 };
+  const record = { sessionId: "unavailable", scope, status: "unavailable" as const, encryptedLocator: null, reasonCode: "provider_unavailable", createdAt: c.createdAt, expiresAt: "2026-11-08T12:00:30.000Z", endedAt: c.createdAt };
+  assert.equal(await store.putLiveView(scope, record), false, "queued checks cannot save unavailable viewer sessions");
+  const current = (await store.updateRun(c.id, 1, 0, { state: "collecting", stages: [{ id: "browser", label: "Browser", status: "completed" }] }))!;
+  assert.equal(await store.putLiveView(scope, record), false, "finished browser cannot save a late unavailable session");
+  assert.ok(await store.updateRun(c.id, 1, current.revision, { stages: [{ id: "browser", label: "Browser", status: "running" }] }));
+  assert.equal(await store.putLiveView({ ...scope, generation: 2 }, { ...record, scope: { ...scope, generation: 2 } }), false);
+  assert.equal(await store.putLiveView({ ...scope, ownerId: "bob" }, { ...record, scope: { ...scope, ownerId: "bob" } }), false);
+  for (const changed of [
+    { ...record, encryptedLocator: "forbidden-ciphertext" }, { ...record, connectedAt: c.createdAt },
+    { ...record, reasonCode: undefined }, { ...record, endedAt: "2026-11-08T11:59:59.000Z" },
+    { ...record, endedAt: "2026-11-08T12:00:01.000Z" }, { ...record, expiresAt: "2026-11-08T12:01:01.000Z" },
+    { ...record, status: "ended" as const }, { ...record, status: "connected" as const },
+  ]) assert.equal(await store.putLiveView(scope, changed), false);
+  await assert.rejects(store.putLiveView(scope, { ...record, reasonCode: "https://private.example/secret" }));
+  assert.equal(await store.putLiveView(scope, record), true);
+  assert.deepEqual(await store.getLiveView("alice", c.id, scope), record);
+  assert.equal(await store.getLiveView("bob", c.id, scope), null);
+  assert.equal(await store.putLiveView(scope, { ...record, sessionId: "second" }), false);
+  assert.equal(await store.updateLiveView(scope, record.sessionId, { status: "connected" }), false);
+});
+
+test("expired live reads return bounded owner metadata without retaining a capability", async () => {
+  let now = new Date("2026-11-08T12:00:00.000Z");
+  const store = new MemoryStore({ now: () => now }), c = await store.createCheck("alice", input, "expiry-metadata");
+  const scope = { ownerId: "alice", checkId: c.id, runId: c.runId, generation: 1 };
+  await store.updateRun(c.id, 1, 0, { state: "collecting", stages: [{ id: "browser", label: "Browser", status: "running" }] });
+  const record = { sessionId: "expired", scope, status: "ready" as const, encryptedLocator: "private-ciphertext", createdAt: c.createdAt, expiresAt: "2026-11-08T12:00:30.000Z" };
+  assert.equal(await store.putLiveView(scope, record), true);
+  now = new Date("2026-11-08T12:00:31.000Z");
+  const expired = await store.getLiveView("alice", c.id, scope);
+  assert.ok(expired);
+  assert.equal(expired.encryptedLocator, null);
+  assert.equal(expired.status, "ended");
+  assert.equal(expired.reasonCode, "expired");
+  assert.equal(expired.expiresAt, record.expiresAt);
+  assert.equal(await store.getLiveView("bob", c.id, scope), null);
+  assert.equal(await store.getLiveView("alice", c.id, { ...scope, generation: 2 }), null);
+});
+
+test("cancel, terminal, deletion, overdue reads and purge retire live ciphertext", async () => {
+  for (const action of ["cancel", "terminal", "delete", "overdue", "admission", "purge", "expiry"] as const) {
+    let now = new Date("2026-11-08T12:00:00.000Z");
+    const store = new MemoryStore({ now: () => now }), c = await store.createCheck("alice", input, action);
+    const scope = { ownerId: "alice", checkId: c.id, runId: c.runId, generation: 1 };
+    const collecting = await store.updateRun(c.id, 1, 0, { state: "collecting", stages: [{ id: "browser", label: "Browser", status: "running" }] });
+    const record = { sessionId: action, scope, status: "ready" as const, encryptedLocator: "sealed", createdAt: c.createdAt, expiresAt: "2026-11-08T12:00:30.000Z" };
+    assert.equal(await store.putLiveView(scope, record), true);
+    if (action === "cancel") await store.requestCancel("alice", c.id);
+    if (action === "terminal") await store.updateRun(c.id, 1, collecting!.revision, { state: "analyzing" });
+    if (action === "delete") await store.deleteCheck("alice", c.id);
+    if (["overdue", "admission", "purge"].includes(action)) now = new Date("2026-11-08T12:05:01.000Z");
+    if (action === "overdue") await store.getCheck("alice", c.id);
+    if (action === "admission") await store.createCheck("bob", input, "next");
+    if (action === "purge") await store.purgeExpired();
+    if (action === "expiry") { now = new Date("2026-11-08T12:00:31.000Z"); await store.purgeExpired(); }
+    const result = await store.getLiveView("alice", c.id, scope);
+    if (action === "expiry") { assert.ok(result); assert.equal(result.encryptedLocator, null); assert.equal(result.reasonCode, "expired"); }
+    else assert.equal(result, null, action);
+    assert.equal(await store.putLiveView(scope, record), false, action);
+    const rows = [...(store as unknown as { liveViews: Map<string, { encryptedLocator: string | null }> }).liveViews.values()];
+    assert.ok(rows.every(row => row.encryptedLocator === null), action);
+  }
+});
+
+test("old-session finally cannot clear a new generation, and browser activity gates delivery", async () => {
+  const store = makeStore(), c = await store.createCheck("alice", input, "fencing");
+  const scope = { ownerId: "alice", checkId: c.id, runId: c.runId, generation: 1 };
+  await store.updateRun(c.id, 1, 0, { state: "collecting", stages: [{ id: "browser", label: "Browser", status: "running", startedAt: c.createdAt, detailCode: "navigate" }] });
+  const record = { sessionId: "old", scope, status: "ready" as const, encryptedLocator: "old-cipher", createdAt: c.createdAt, expiresAt: "2026-11-08T12:00:30.000Z" };
+  assert.equal(await store.putLiveView(scope, record), true);
+  // Simulate a new durable run identity; the public API starts new checks.
+  const saved = (store as unknown as { checks: Map<string, typeof c> }).checks.get(c.id)!;
+  saved.generation = 2; saved.runId = "new-run";
+  const nextScope = { ...scope, generation: 2, runId: "new-run" };
+  assert.equal(await store.putLiveView(nextScope, { ...record, scope: nextScope, sessionId: "new", encryptedLocator: "new-cipher" }), true);
+  assert.equal(await store.updateLiveView(scope, "new", { status: "ended" }), false);
+  assert.equal(await store.updateLiveView(scope, "old", { status: "ended" }), true);
+  assert.equal((await store.getLiveView("alice", c.id, nextScope))?.encryptedLocator, "new-cipher");
+  saved.stages[0].status = "completed";
+  assert.equal(await store.getLiveView("alice", c.id, nextScope), null);
+  assert.equal(await store.updateLiveView(nextScope, "new", { status: "connected" }), false);
+});
+
+test("live writes reject replacement locators, invalid times and unbounded reason codes", async () => {
+  const store = makeStore(), c = await store.createCheck("alice", input, "validation");
+  const scope = { ownerId: "alice", checkId: c.id, runId: c.runId, generation: 1 };
+  await store.updateRun(c.id, 1, 0, { state: "collecting", stages: [{ id: "browser", label: "Browser", status: "running" }] });
+  const record = { sessionId: "session", scope, status: "ready" as const, encryptedLocator: "sealed", createdAt: c.createdAt, expiresAt: "2026-11-08T12:01:01.000Z" };
+  assert.equal(await store.putLiveView(scope, record), false);
+  assert.equal(await store.putLiveView(scope, { ...record, expiresAt: "2026-11-08T12:00:30.000Z" }), true);
+  await assert.rejects(store.updateLiveView(scope, "session", { status: "ended", encryptedLocator: "replacement" } as never));
+  await assert.rejects(store.updateLiveView(scope, "session", { status: "ended", reasonCode: "https://secret" }));
+  const check = await store.getCheck("alice", c.id);
+  assert.ok(await store.updateRun(c.id, 1, check!.revision, { stages: [{ id: "browser", label: "Browser", status: "canceled", finishedAt: c.createdAt }, { id: "trust", label: "Trust", status: "skipped" }] }));
+});
 async function addReviewEvidence(store: MemoryStore, c: { id: string; runId: string }) {
   await store.saveObservation("alice", { id: "review-evidence", checkId: c.id, runId: c.runId, kind: "page", status: "observed", sourceKind: "live_page", sourceRef: "https://example.org/", observedAt: "2026-11-08T12:00:00.000Z", data: { hostname: "example.org", text: "Request a payment" }, collectorVersion: "1", policyVersion: "1" });
 }

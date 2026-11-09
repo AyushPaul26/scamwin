@@ -34,6 +34,9 @@ test('PostgresStore executes the real schema and SQL without a network database'
         const c = index.config;
         await db.exec(`CREATE ${c.unique ? 'UNIQUE ' : ''}INDEX ${quote(c.name)} ON ${quote(table.name)} (${c.columns.map(c => quote(c.name))})${c.where ? ' WHERE ' + dialect.sqlToQuery(c.where).sql : ''}`);
       }
+      for (const constraint of table.checks) {
+        await db.exec(`ALTER TABLE ${quote(table.name)} ADD CONSTRAINT ${quote(constraint.name)} CHECK (${dialect.sqlToQuery(constraint.value).sql})`);
+      }
     }
     let queryCount = 0;
     async function execute(descriptor, tx = db) {
@@ -51,6 +54,120 @@ test('PostgresStore executes the real schema and SQL without a network database'
     const reset = () => db.exec(`TRUNCATE ${configs.map(c => quote(c.name)).join(',')} CASCADE`);
     const input = {url:'https://example.com',message:'Synthetic offer',promisedBenefit:'Refund',intendedAction:'Receive money',images:[]};
     async function run(name, fn) { await t.test(name, async () => { await reset(); await fn(); }); }
+    await run('terminal SQL storage paths finish running stages and skip unstarted work atomically',async()=>{
+      for(const action of ['queued_cancel','cancel','deadline_read','deadline_admission','deadline_purge','delete','terminal_failed','terminal_canceled','expiry']){
+        await reset();const c=await store.createCheck('alice',input,action),oldFinish='2026-11-08T11:59:59.000Z';let current=c;
+        if(action!=='queued_cancel')current=await store.updateRun(c.id,1,c.revision,{state:'collecting',stages:[
+          {id:'intake',label:'Intake',status:'completed',finishedAt:oldFinish},
+          {id:'browser',label:'Browser',status:'running',startedAt:c.createdAt},
+          {id:'trust',label:'Trust',status:'pending'},
+        ]});
+        const before=Date.now();
+        if(['queued_cancel','cancel'].includes(action))await store.requestCancel('alice',c.id);
+        if(action.startsWith('deadline'))await db.query("UPDATE scamwin_checks SET created_at=now()-interval '301 seconds' WHERE id=$1",[c.id]);
+        if(action==='deadline_read')await store.getInternalCheck(c.id);
+        if(action==='deadline_admission')await store.createCheck('bob',input,'next');
+        if(action==='deadline_purge')await store.purgeExpired();
+        if(action==='delete')await store.deleteCheck('alice',c.id);
+        if(action==='terminal_failed'||action==='terminal_canceled')await store.updateRun(c.id,1,current.revision,{state:action==='terminal_failed'?'failed':'canceled'});
+        if(action==='expiry'){await db.query("UPDATE scamwin_checks SET expires_at=now()-interval '1 second' WHERE id=$1",[c.id]);await store.purgeExpired();}
+        const saved=(await db.query('SELECT record FROM scamwin_checks WHERE id=$1',[c.id])).rows[0].record;
+        assert.ok(saved.stages.every(s=>!['pending','running'].includes(s.status)),action);
+        if(action==='queued_cancel'){assert.ok(saved.stages.every(s=>s.status==='skipped'&&!s.startedAt&&!s.finishedAt));continue;}
+        assert.equal(saved.stages[0].status,'completed',action);assert.equal(saved.stages[0].finishedAt,oldFinish,action);
+        assert.equal(saved.stages[1].status,action.startsWith('deadline')||action==='terminal_failed'?'unavailable':'canceled',action);
+        assert.ok(Date.parse(saved.stages[1].finishedAt)>=before&&Date.parse(saved.stages[1].finishedAt)<=Date.now(),action);
+        assert.equal(saved.stages[2].status,'skipped',action);assert.equal(saved.stages[2].finishedAt,undefined,action);
+      }
+    });
+    async function liveFixture() {
+      const c=await store.createCheck('alice',input,'live');
+      await store.updateRun(c.id,1,c.revision,{state:'collecting',stages:[{id:'browser',label:'Browser',status:'running'}]});
+      const scope={ownerId:'alice',checkId:c.id,runId:c.runId,generation:1};
+      const record={sessionId:'session',scope,status:'ready',encryptedLocator:'sealed',createdAt:new Date().toISOString(),expiresAt:new Date(Date.now()+30000).toISOString()};
+      return {c,scope,record};
+    }
+    await run('live SQL protects owner/run/session boundaries and cannot resurrect a terminal session',async()=>{
+      const {c,scope,record}=await liveFixture();
+      assert.equal(await store.putLiveView({...scope,generation:2},{...record,scope:{...scope,generation:2}}),false);
+      assert.equal(await store.putLiveView(scope,record),true);
+      assert.equal(await store.putLiveView(scope,{...record,sessionId:'replacement'}),false);
+      assert.equal(await store.getLiveView('bob',c.id,scope),null);
+      assert.equal(await store.getLiveView('alice',c.id,{...scope,runId:'old'}),null);
+      assert.equal((await store.getLiveView('alice',c.id,scope)).encryptedLocator,'sealed');
+      assert.equal(await store.updateLiveView(scope,'old-session',{status:'ended'}),false);
+      assert.equal(await store.updateLiveView(scope,'session',{status:'connected'}),true);
+      assert.equal(await store.updateLiveView(scope,'session',{status:'ended'}),true);
+      assert.equal((await store.getLiveView('alice',c.id,scope)).encryptedLocator,null);
+      assert.equal(await store.updateLiveView(scope,'session',{status:'connected'}),false);
+      assert.equal(await store.putLiveView(scope,record),false);
+      assert.equal(JSON.stringify((await db.query('SELECT record FROM scamwin_checks')).rows).includes('sealed'),false);
+    });
+    await run('live SQL accepts an initial unavailable session only without secrets and within current browser scope',async()=>{
+      const {c,scope,record}=await liveFixture();
+      const unavailable={...record,status:'unavailable',encryptedLocator:null,reasonCode:'provider_unavailable',endedAt:record.createdAt};
+      for(const changed of [
+        {...unavailable,encryptedLocator:'forbidden-ciphertext'}, {...unavailable,connectedAt:record.createdAt},
+        {...unavailable,reasonCode:undefined}, {...unavailable,endedAt:new Date(Date.parse(record.createdAt)-1000).toISOString()},
+        {...unavailable,endedAt:new Date(Date.now()+10000).toISOString()}, {...unavailable,status:'ended'}, {...unavailable,status:'connected'},
+      ]) assert.equal(await store.putLiveView(scope,changed),false);
+      await assert.rejects(store.putLiveView(scope,{...unavailable,reasonCode:'https://private.example/secret'}));
+      assert.equal(await store.putLiveView({...scope,generation:2},{...unavailable,scope:{...scope,generation:2}}),false);
+      assert.equal(await store.putLiveView({...scope,ownerId:'bob'},{...unavailable,scope:{...scope,ownerId:'bob'}}),false);
+      await db.query("UPDATE scamwin_checks SET record=jsonb_set(record,'{stages,0,status}','\"completed\"') WHERE id=$1",[c.id]);
+      assert.equal(await store.putLiveView(scope,unavailable),false);
+      await db.query("UPDATE scamwin_checks SET record=jsonb_set(record,'{stages,0,status}','\"running\"') WHERE id=$1",[c.id]);
+      assert.equal(await store.putLiveView(scope,unavailable),true);
+      const saved=await store.getLiveView('alice',c.id,scope);
+      assert.equal(saved.status,'unavailable'); assert.equal(saved.encryptedLocator,null); assert.equal(saved.reasonCode,'provider_unavailable'); assert.equal(saved.endedAt,unavailable.endedAt);
+      assert.equal(await store.putLiveView(scope,{...unavailable,sessionId:'second'}),false);
+      assert.equal(await store.updateLiveView(scope,'session',{status:'connected'}),false);
+    });
+    await run('expired SQL viewer retains bounded owner metadata without a locator',async()=>{
+      const {c,scope,record}=await liveFixture();
+      assert.equal(await store.putLiveView(scope,record),true);
+      await db.query("UPDATE scamwin_live_views SET expires_at=now()-interval '1 second' WHERE session_id='session'");
+      const expired=await store.getLiveView('alice',c.id,scope);
+      assert.ok(expired); assert.equal(expired.status,'ended'); assert.equal(expired.reasonCode,'expired'); assert.equal(expired.encryptedLocator,null);
+      assert.equal(await store.getLiveView('bob',c.id,scope),null);
+      assert.equal(await store.getLiveView('alice',c.id,{...scope,generation:2}),null);
+    });
+    await run('live SQL cancellation/save races and every retirement path clear ciphertext',async()=>{
+      for(const action of ['race','terminal','delete','overdue','admission','purge','expiry']) {
+        await reset(); const {c,scope,record}=await liveFixture();
+        if(action==='race') {
+          await Promise.all([store.putLiveView(scope,record),store.requestCancel('alice',c.id)]);
+        } else {
+          assert.equal(await store.putLiveView(scope,record),true);
+          if(action==='terminal') { const current=await store.getCheck('alice',c.id); await store.updateRun(c.id,1,current.revision,{state:'analyzing'}); }
+          if(action==='delete') await store.deleteCheck('alice',c.id);
+          if(['overdue','admission','purge'].includes(action)) await db.query("UPDATE scamwin_checks SET created_at=now()-interval '301 seconds' WHERE id=$1",[c.id]);
+          if(action==='overdue') await store.getCheck('alice',c.id);
+          if(action==='admission') await store.createCheck('bob',input,'new');
+          if(action==='expiry') await db.query("UPDATE scamwin_live_views SET expires_at=now()-interval '1 second' WHERE session_id='session'");
+          if(['purge','expiry'].includes(action)) await store.purgeExpired();
+        }
+        const result=await store.getLiveView('alice',c.id,scope);
+        if(action==='expiry') {assert.ok(result);assert.equal(result.encryptedLocator,null);assert.equal(result.reasonCode,'expired');}
+        else assert.equal(result,null,action);
+        assert.equal(await store.putLiveView(scope,record),false,action);
+        assert.equal((await db.query('SELECT count(*)::int AS n FROM scamwin_live_views WHERE encrypted_locator IS NOT NULL')).rows[0].n,0,action);
+      }
+    });
+    await run('old SQL session finalizers cannot end a new generation and inactive stages deny reads',async()=>{
+      const {c,scope,record}=await liveFixture();
+      assert.equal(await store.putLiveView(scope,record),true);
+      await db.query("UPDATE scamwin_checks SET generation=2,record=record||jsonb_build_object('generation',2,'runId','new-run') WHERE id=$1",[c.id]);
+      await db.query("INSERT INTO scamwin_runs(id,check_id,generation,state,deadline,owner_id) VALUES('new-run',$1,2,'collecting',now()+interval '300 seconds','alice')",[c.id]);
+      const next={...scope,runId:'new-run',generation:2};
+      assert.equal(await store.putLiveView(next,{...record,sessionId:'new-session',scope:next,encryptedLocator:'new-cipher'}),true);
+      assert.equal(await store.updateLiveView(scope,'new-session',{status:'ended'}),false);
+      assert.equal(await store.updateLiveView(scope,'session',{status:'ended'}),true);
+      assert.equal((await store.getLiveView('alice',c.id,next)).encryptedLocator,'new-cipher');
+      await db.query("UPDATE scamwin_checks SET record=jsonb_set(record,'{stages,0,status}','\"completed\"') WHERE id=$1",[c.id]);
+      assert.equal(await store.getLiveView('alice',c.id,next),null);
+      assert.equal(await store.updateLiveView(next,'new-session',{status:'connected'}),false);
+    });
     async function warningFixture(decision='approve') {
       const c = await store.createCheck('alice', input, 'first');
       await store.saveObservation('alice',{id:'e1',checkId:c.id,runId:c.runId,kind:'origin',status:'observed',sourceKind:'origin_probe',sourceRef:input.url,observedAt:new Date().toISOString(),data:{synthetic:true},collectorVersion:'1',policyVersion:'1'});

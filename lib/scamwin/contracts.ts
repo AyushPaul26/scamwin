@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { LiveViewScope, LiveViewRecord, LiveViewPatch } from "./live-view-contracts";
 
 export const checkStates = ["queued", "validating", "collecting", "analyzing", "completed", "partial", "blocked", "failed", "cancel_requested", "canceled"] as const;
 export type CheckState = (typeof checkStates)[number];
@@ -34,7 +35,7 @@ export const assessmentSchema = z.object({
   missingChecks: z.array(z.string().max(1000)).max(30), nextSteps: z.array(z.string().max(1000)).max(20),
 }).strict();
 export type Assessment = z.infer<typeof assessmentSchema>;
-export type CheckStage = { id: string; label: string; status: "pending" | "running" | "completed" | "unavailable" | "blocked" };
+export type CheckStage = { id: string; label: string; status: "pending" | "running" | "completed" | "unavailable" | "blocked" | "skipped" | "canceled"; startedAt?: string; finishedAt?: string; detailCode?: string };
 export type RelatedCase = { checkId: string; reason: string; evidenceIds: string[] };
 export type IndicatorKind = "hostname" | "recipient" | "endpoint";
 export type IndicatorFingerprint = { kind: IndicatorKind; fingerprint: string };
@@ -64,6 +65,9 @@ export type ReviewInput = { decision: "approve" | "reject" | "request_informatio
 export type ScamwinRole = "reviewer" | "admin";
 export type CheckPage = { checks: CheckRecord[]; total: number; page: number; pageSize: number };
 export interface ScamwinStore {
+  putLiveView(scope: LiveViewScope, record: LiveViewRecord): Promise<boolean>;
+  getLiveView(ownerId: string, checkId: string, expectedRun: { runId: string; generation: number }): Promise<LiveViewRecord | null>;
+  updateLiveView(scope: LiveViewScope, sessionId: string, patch: LiveViewPatch): Promise<boolean>;
   createCheck(ownerId: string, input: CheckInput, submissionKey: string): Promise<CheckRecord>;
   getCheck(ownerId: string, id: string): Promise<CheckRecord | null>;
   getInternalCheck(id: string): Promise<CheckRecord | null>;

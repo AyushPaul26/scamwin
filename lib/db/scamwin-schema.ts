@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { index, integer, jsonb, pgTable, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
+import { check, index, integer, jsonb, pgTable, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
 import type { Assessment, Artifact, CheckMessage, CheckRecord, Observation, PublicWarning, WarningSubmission } from "../scamwin/contracts";
 
 const time = (name: string) => timestamp(name, { withTimezone: true }).notNull().defaultNow();
@@ -15,6 +15,13 @@ export const scamwinRuns = pgTable("scamwin_runs", {
   // Durable admissions stay counted even when a private check is soft deleted.
   ownerId: text("owner_id").notNull(), createdAt: time("created_at"),
 }, (t) => [uniqueIndex("scamwin_run_generation_uidx").on(t.checkId, t.generation), index("scamwin_run_admission_idx").on(t.createdAt, t.ownerId)]);
+export const scamwinLiveViews = pgTable("scamwin_live_views", {
+  sessionId: text("session_id").primaryKey(), ownerId: text("owner_id").notNull(),
+  checkId: text("check_id").notNull().references(() => scamwinChecks.id, { onDelete: "cascade" }),
+  runId: text("run_id").notNull(), generation: integer("generation").notNull(), status: text("status").notNull(),
+  encryptedLocator: text("encrypted_locator"), createdAt: time("created_at"), expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  connectedAt: timestamp("connected_at", { withTimezone: true }), endedAt: timestamp("ended_at", { withTimezone: true }), reasonCode: text("reason_code"),
+}, (t) => [uniqueIndex("scamwin_live_view_run_uidx").on(t.checkId, t.runId, t.generation), index("scamwin_live_view_owner_idx").on(t.ownerId, t.checkId), index("scamwin_live_view_expiry_idx").on(t.expiresAt), check("scamwin_live_view_status_check", sql`${t.status} in ('ready','connected','ended','unavailable')`), check("scamwin_live_view_reason_check", sql`${t.reasonCode} is null or ${t.reasonCode} ~ '^[a-z][a-z0-9_]{0,79}$'`)]);
 export const scamwinArtifacts = pgTable("scamwin_artifacts", {
   id: text("id").primaryKey(), checkId: text("check_id").notNull().references(() => scamwinChecks.id, { onDelete: "cascade" }), ownerId: text("owner_id").notNull(), runId: text("run_id"),
   kind: text("kind").notNull(), bytes: integer("bytes").notNull(), sha256: text("sha256").notNull(), record: jsonb("record").$type<Artifact>().notNull(), expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(), createdAt: time("created_at"),
