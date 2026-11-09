@@ -1,0 +1,7 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "fluid": true,
+  "crons": [
+    { "path": "/api/scamwin/maintenance", "schedule": "0 0 * * *" }
+  ]
+}

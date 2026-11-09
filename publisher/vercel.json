@@ -1,0 +1,10 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": null,
+  "installCommand": "npm ci",
+  "buildCommand": "npm run build",
+  "outputDirectory": "public",
+  "fluid": true,
+  "functions": { "api/relay.ts": { "maxDuration": 300 } },
+  "crons": [{ "path": "/api/relay", "schedule": "0 1 * * *" }]
+}

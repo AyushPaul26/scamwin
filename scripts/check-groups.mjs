@@ -1,0 +1,33 @@
+import assert from 'node:assert/strict';
+import {randomUUID} from 'node:crypto';
+import {neon} from '@neondatabase/serverless';
+import {chromium} from 'playwright';
+import {decrypt} from '../node_modules/@auth0/nextjs-auth0/dist/server/cookies.js';
+import {createPreviewContext} from './creature-preview-session.mjs';
+const base=process.argv[2]??'http://localhost:3000';const browser=await chromium.launch();
+const context=await createPreviewContext(browser,base,{viewport:{width:1280,height:900},reducedMotion:'reduce'});
+const owner=(await decrypt((await context.cookies()).find(c=>c.name==='__session').value,process.env.AUTH0_SECRET)).payload.user.sub;
+const sql=neon(process.env.DATABASE_URL);const ids=[randomUUID(),randomUUID(),randomUUID()];
+try{
+ for(let i=0;i<3;i++)await sql`INSERT INTO bots(id,user_id,name,avatar,job,sandbox_id) VALUES(${ids[i]},${owner},${`Member ${i+1}`},${'a'.repeat(21)},'Developer','group-form-fixture')`;
+ const page=await context.newPage();page.setDefaultTimeout(45000);await page.goto(base+'/dashboard');
+ await page.getByRole('button',{name:'New group',exact:true}).last().click();
+ const dialog=page.getByRole('dialog');await dialog.getByRole('button',{name:'Save group',exact:true}).click();await dialog.getByText('Enter a group name.',{exact:true}).waitFor();
+ await dialog.getByRole('textbox',{name:'Name',exact:true}).fill('  Test team  ');
+ await dialog.getByRole('checkbox').nth(0).check();await dialog.getByRole('button',{name:'Save group',exact:true}).click();await dialog.getByText('Select at least two bots.',{exact:true}).waitFor();
+ await dialog.getByRole('checkbox').nth(1).check();await dialog.getByRole('button',{name:'Save group',exact:true}).click();await page.waitForURL(/\/chats\//);
+ const id=page.url().split('/').at(-1);const before=await sql`SELECT bot_id,joined_at FROM chat_members WHERE chat_id=${id} ORDER BY joined_at,bot_id`;
+ assert.equal((await sql`SELECT name FROM chats WHERE id=${id}`)[0].name,'Test team');
+ const removed=await page.getByLabel('Send to',{exact:true}).inputValue();const retained=before.find(row=>row.bot_id!==removed);const added=ids.find(id=>!before.some(row=>row.bot_id===id));
+ await page.getByRole('button',{name:'Edit group',exact:true}).click();await dialog.getByRole('textbox',{name:'Name',exact:true}).fill('Updated team');
+ await dialog.locator(`input[value="${removed}"]`).uncheck();await dialog.locator(`input[value="${added}"]`).check();await dialog.getByRole('button',{name:'Save group',exact:true}).click();await dialog.waitFor({state:'hidden'});
+ await page.getByRole('heading',{name:'Updated team',exact:true}).waitFor();
+ assert.equal(await page.getByLabel('Send to',{exact:true}).inputValue(),retained.bot_id);
+ const after=await sql`SELECT bot_id,joined_at FROM chat_members WHERE chat_id=${id} ORDER BY joined_at,bot_id`;
+ assert.equal(after[0].bot_id,retained.bot_id);assert.equal(new Date(after[0].joined_at).getTime(),new Date(retained.joined_at).getTime());
+ await sql`DELETE FROM chat_members WHERE chat_id=${id} AND bot_id=${added}`;await page.reload();await page.getByLabel('Send to',{exact:true}).waitFor();assert.equal(await page.getByLabel('Send to',{exact:true}).isDisabled(),false);
+ await sql`DELETE FROM chat_members WHERE chat_id=${id}`;await page.reload();await page.getByText('Add teammates to send messages.',{exact:true}).waitFor();assert.equal(await page.getByRole('button',{name:'Send message',exact:true}).isDisabled(),true);
+ await page.getByRole('button',{name:'Edit group',exact:true}).click();await dialog.getByRole('button',{name:'Delete group',exact:true}).click();await dialog.getByRole('button',{name:'Confirm delete group',exact:true}).click();await page.waitForURL(/\/dashboard$/);
+ assert.equal((await sql`SELECT id FROM chats WHERE id=${id}`).length,0);assert.equal((await sql`SELECT id FROM bots WHERE user_id=${owner}`).length,3);
+ console.log('Groups passed: invalid forms, trimmed creation, edit with retained ordering and recipient reconciliation, one/zero-member readability, deletion preserves bots.');
+}finally{await browser.close();await sql`DELETE FROM chats WHERE user_id=${owner}`;await sql`DELETE FROM bots WHERE user_id=${owner}`;}

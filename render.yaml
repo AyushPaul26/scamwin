@@ -1,0 +1,40 @@
+# yaml-language-server: $schema=https://render.com/schema/render.yaml.json
+previews:
+  generation: off
+
+services:
+  - type: web
+    name: openmods
+    runtime: node
+    plan: 0.5c-512mb
+    numInstances: 1
+    autoDeployTrigger: commit
+    buildCommand: npm ci --include=dev && npm run build
+    startCommand: npm run start:render
+    healthCheckPath: /healthz
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: APP_BASE_URL
+        fromService:
+          name: openmods
+          type: web
+          envVarKey: RENDER_EXTERNAL_URL
+      - key: AUTH0_DOMAIN
+        sync: false
+      - key: AUTH0_CLIENT_ID
+        sync: false
+      - key: AUTH0_CLIENT_SECRET
+        sync: false
+      - key: AUTH0_SECRET
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: TRIGGER_SECRET_KEY
+        sync: false
+      - key: DAYTONA_API_KEY
+        sync: false
+      - key: DAYTONA_API_URL
+        value: https://app.daytona.io/api
+      - key: OPENMODS_ENV
+        value: production

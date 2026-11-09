@@ -1,0 +1,41 @@
+{
+  "blender": "4.5.9 LTS",
+  "meshes": 36,
+  "triangles": 17395,
+  "materials": [
+    "body",
+    "cream",
+    "accent",
+    "nose",
+    "iris",
+    "eye_white",
+    "eye_highlight",
+    "iris_glow"
+  ],
+  "bones": [
+    "root",
+    "head",
+    "eye_L",
+    "eye_R",
+    "leg_L_0",
+    "leg_L_1",
+    "leg_L_2",
+    "leg_R_0",
+    "leg_R_1",
+    "leg_R_2"
+  ],
+  "animations": [
+    "idle",
+    "greet"
+  ],
+  "morphTargets": [
+    "Blink"
+  ],
+  "fileBytes": 627972,
+  "coordinateSystem": "glTF: Y up, +Z forward",
+  "runtimePaletteMaterials": [
+    "body",
+    "cream",
+    "accent"
+  ]
+}

@@ -1,0 +1,27 @@
+{
+  "name": "@scamwin/registry",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=24 <25" },
+  "scripts": {
+    "build": "hardhat build",
+    "test": "hardhat test nodejs",
+    "test:normalization": "node --import tsx --test ../tests/scamwin-normalization.test.ts",
+    "typecheck": "tsc --noEmit",
+    "export:abi": "hardhat build && node scripts/export-abi.mjs",
+    "read": "tsx scripts/read-registry.ts",
+    "deploy:base-sepolia": "hardhat build && tsx scripts/deploy.ts"
+  },
+  "dependencies": { "@openzeppelin/contracts": "5.6.1", "viem": "2.57.16" },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-viem": "3.1.0",
+    "@nomicfoundation/hardhat-node-test-runner": "3.1.2",
+    "@nomicfoundation/hardhat-network-helpers": "3.0.12",
+    "hardhat": "3.21.2",
+    "solc": "0.8.30",
+    "tsx": "4.23.15",
+    "typescript": "5.9.3",
+    "@types/node": "24.10.0"
+  }
+}

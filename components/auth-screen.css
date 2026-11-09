@@ -1,0 +1,89 @@
+.auth-page {
+  color-scheme: dark;
+  min-height: 100dvh;
+  background: #000;
+  color: #ededed;
+  font-family: var(--font-geist-sans), sans-serif;
+}
+
+.auth-header {
+  height: 64px;
+  padding: 0 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.auth-logo { display: inline-flex; padding: 4px; }
+.auth-logo svg { width: 20px; height: 20px; }
+.auth-switch {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 32px;
+  padding: 0 13px;
+  background: #111;
+  border: 1px solid #333;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.auth-main { padding: 0 24px 64px; }
+.auth-form { width: 100%; max-width: 280px; margin: 0 auto; }
+.auth-form h1 {
+  margin: 0 0 24px;
+  text-align: center;
+  font-size: 26px;
+  font-weight: 600;
+  line-height: 1.3;
+  letter-spacing: -1px;
+  text-wrap: balance;
+}
+.auth-email, .auth-providers { display: flex; flex-direction: column; gap: 12px; }
+.auth-email input[type="email"] {
+  width: 100%;
+  height: 36px;
+  border: 1px solid #292929;
+  border-radius: 8px;
+  background: #111;
+  padding: 0 12px;
+  font: inherit;
+  font-size: 14px;
+  color: #ededed;
+  box-shadow: 0 1px 2px #000;
+}
+.auth-email input::placeholder { color: #888; }
+.auth-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 36px;
+  padding: 7px 12px;
+  border: 1px solid #333;
+  border-radius: 8px;
+  background: #111;
+  color: #ededed;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 20px;
+  cursor: pointer;
+  transition: background-color 150ms, border-color 150ms;
+}
+.auth-button svg { width: 16px; height: 16px; flex: 0 0 16px; }
+.auth-email-button { background: #ededed; border-color: #ededed; color: #0a0a0a; }
+.auth-email-button:hover { background: #ccc; border-color: #ccc; }
+.auth-provider:hover, .auth-switch:hover { background: #1f1f1f; border-color: #555; }
+.auth-divider { height: 1px; background: #242424; margin: 14px 0; }
+.auth-footer { margin: 28px 0 0; text-align: center; font-size: 14px; line-height: 24px; }
+.auth-footer a { color: #3291ff; }
+.auth-footer a:hover { text-decoration: underline; text-underline-offset: 3px; }
+.auth-page :is(a, button, input):focus-visible { outline: 2px solid #3291ff; outline-offset: 4px; }
+@media (max-width: 380px) {
+  .auth-header { padding: 0 16px; }
+  .auth-main { padding-inline: 20px; }
+  .auth-form h1 { font-size: 26px; }
+}
+@media (prefers-reduced-motion: reduce) { .auth-button { transition: none; } }
