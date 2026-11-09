@@ -8,6 +8,7 @@ import type { Artifact, ArtifactInput, CheckInput, CheckMessage, CheckPage, Chec
 import { checkInputSchema, isPublicInputUrl, validatePreparedImage } from "./input";
 import type { LiveViewScope, LiveViewRecord, LiveViewPatch } from "./live-view-contracts";
 import { createInitialStages, finishInterruptedStages } from "./progress";
+import { dailyCheckAllowanceKey, effectiveDailyCheckLimit, type DailyCheckAllowance } from "./daily-check-allowance";
 
 const DAY = 86400000, ARTIFACT_CAP = 200 * 1024 * 1024;
 const active = new Set(["queued", "validating", "collecting", "analyzing", "cancel_requested"]);
@@ -85,6 +86,7 @@ export class MemoryStore implements ScamwinStore {
   private checks = new Map<string, CheckRecord>();
   private deleted = new Set<string>();
   private admissions: { ownerId: string; createdAt: string }[] = [];
+  private dailyCheckAllowances = new Map<string, DailyCheckAllowance>();
   private observations = new Map<string, Observation>();
   private artifacts = new Map<string, Artifact>();
   private messages = new Map<string, CheckMessage>();
@@ -98,9 +100,10 @@ export class MemoryStore implements ScamwinStore {
   private operations: OperationalState = { investigationPaused: false, publicationPaused: false };
   private operationalAudit: { action: string; code: string; at: string }[] = [];
   private now: () => Date;
-  constructor(options: { now?: () => Date; initialRoles?: { ownerId: string; role: ScamwinRole }[] } = {}) {
+  constructor(options: { now?: () => Date; initialRoles?: { ownerId: string; role: ScamwinRole }[]; dailyCheckAllowances?: DailyCheckAllowance[] } = {}) {
     this.now = options.now ?? (() => new Date());
     options.initialRoles?.forEach(({ ownerId, role }) => this.roles.add(`${ownerId}:${role}`));
+    options.dailyCheckAllowances?.forEach(record => this.dailyCheckAllowances.set(record.ownerId, clone(record)));
   }
   private read(id: string, ownerId?: string): CheckRecord | null {
     const c = this.checks.get(id);
@@ -161,7 +164,7 @@ export class MemoryStore implements ScamwinStore {
     const day = now.toISOString().slice(0, 10), month = day.slice(0, 7);
     if (this.admissions.filter((a) => a.createdAt.startsWith(day)).length >= 10) fail("global_daily_quota");
     if (this.admissions.filter((a) => a.createdAt.startsWith(month)).length >= 50) fail("global_monthly_quota");
-    if (this.admissions.filter((a) => a.ownerId === ownerId && a.createdAt.startsWith(day)).length >= 3) fail("owner_daily_quota");
+    if (this.admissions.filter((a) => a.ownerId === ownerId && a.createdAt.startsWith(day)).length >= effectiveDailyCheckLimit(ownerId, this.dailyCheckAllowances.get(ownerId), now)) fail("owner_daily_quota");
     const activeChecks = [...this.checks.values()].filter((v) => this.read(v.id) && active.has(v.state));
     if (activeChecks.some((v) => v.ownerId === ownerId)) fail("active_check");
     if (activeChecks.length >= 2) fail("global_active_quota");
@@ -447,6 +450,7 @@ export class PostgresStore implements ScamwinStore {
   }
   async createCheck(ownerId: string, input: CheckInput, submissionKey: string) {
     const now = new Date(), c = newCheck(ownerId, input, submissionKey, now), images = separateImages(c, now), sql = this.sql;
+    const allowanceKey = dailyCheckAllowanceKey(ownerId);
     const result = await sql.transaction([
       sql`SELECT pg_advisory_xact_lock(hashtext('scamwin-admission'))`,
       sql`SELECT pg_advisory_xact_lock(hashtext('scamwin-artifacts'))`,
@@ -459,7 +463,10 @@ export class PostgresStore implements ScamwinStore {
           WHEN EXISTS (SELECT 1 FROM scamwin_registry_sync WHERE id='scamwin-operations' AND record->>'investigationPaused'='true') THEN 'investigation_paused'
           WHEN (SELECT count(*) FROM scamwin_runs WHERE created_at >= date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC') >= 10 THEN 'global_daily_quota'
           WHEN (SELECT count(*) FROM scamwin_runs WHERE created_at >= date_trunc('month', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC') >= 50 THEN 'global_monthly_quota'
-          WHEN (SELECT count(*) FROM scamwin_runs WHERE owner_id=${ownerId} AND created_at >= date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC') >= 3 THEN 'owner_daily_quota'
+          WHEN (SELECT count(*) FROM scamwin_runs WHERE owner_id=${ownerId} AND created_at >= date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC') >= CASE WHEN EXISTS (
+            SELECT 1 FROM scamwin_registry_sync WHERE id=${allowanceKey} AND deployment=${allowanceKey}
+              AND record=jsonb_build_object('schemaVersion',1,'ownerId',${ownerId}::text,'dailyLimit',5,'utcDay',to_char(now() AT TIME ZONE 'UTC','YYYY-MM-DD'),'expiresAt',to_char(date_trunc('day',now() AT TIME ZONE 'UTC')+interval '1 day','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
+          ) THEN 5 ELSE 3 END THEN 'owner_daily_quota'
           WHEN EXISTS (SELECT 1 FROM scamwin_checks WHERE owner_id=${ownerId} AND deleted_at IS NULL AND expires_at>now() AND state IN ('queued','validating','collecting','analyzing','cancel_requested')) THEN 'active_check'
           WHEN (SELECT count(*) FROM scamwin_checks WHERE deleted_at IS NULL AND expires_at>now() AND state IN ('queued','validating','collecting','analyzing','cancel_requested')) >= 2 THEN 'global_active_quota'
           WHEN (SELECT COALESCE(sum(bytes),0) FROM scamwin_artifacts WHERE expires_at>now())+${images.reduce((sum, a) => sum + a.byteLength, 0)} > ${ARTIFACT_CAP} THEN 'artifact_storage_cap' ELSE NULL END AS error),

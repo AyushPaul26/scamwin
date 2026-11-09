@@ -1,6 +1,7 @@
 // Integration test adapter only: no production fallback, socket, or real database.
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
+import { createHash } from 'node:crypto';
 import { PGlite } from '@electric-sql/pglite';
 import test from 'node:test';
 const require = createRequire(new URL('../package.json', import.meta.url));
@@ -54,6 +55,28 @@ test('PostgresStore executes the real schema and SQL without a network database'
     const reset = () => db.exec(`TRUNCATE ${configs.map(c => quote(c.name)).join(',')} CASCADE`);
     const input = {url:'https://example.com',message:'Synthetic offer',promisedBenefit:'Refund',intendedAction:'Receive money',images:[]};
     async function run(name, fn) { await t.test(name, async () => { await reset(); await fn(); }); }
+    async function seedTestAllowance(ownerId, overrides = {}) {
+      const day = new Date().toISOString().slice(0, 10), next = new Date(day + 'T00:00:00.000Z'); next.setUTCDate(next.getUTCDate() + 1);
+      const key = 'scamwin-test-allowance:' + createHash('sha256').update(ownerId).digest('hex');
+      const record = { schemaVersion: 1, ownerId, dailyLimit: 5, utcDay: day, expiresAt: next.toISOString(), ...overrides };
+      await db.query('INSERT INTO scamwin_registry_sync(id,deployment,record) VALUES($1,$1,$2::jsonb)', [key, JSON.stringify(record)]);
+    }
+    await run('test SQL allowance permits only the scoped five admissions, retaining canceled/deleted starts and global caps',async()=>{
+      await seedTestAllowance('alice');
+      for(let i=0;i<5;i++){const c=await store.createCheck('alice',input,String(i));await store.deleteCheck('alice',c.id);}
+      await assert.rejects(store.createCheck('alice',input,'sixth'),/owner_daily_quota/);
+      for(let i=0;i<3;i++){const c=await store.createCheck('bob',input,String(i));await store.deleteCheck('bob',c.id);}
+      await assert.rejects(store.createCheck('bob',input,'fourth'),/owner_daily_quota/);
+      for(let i=0;i<2;i++){const owner='remaining-'+i,c=await store.createCheck(owner,input,'first');await store.deleteCheck(owner,c.id);}
+      await assert.rejects(store.createCheck('over-global',input,'first'),/global_daily_quota/);
+    });
+    await run('expired, foreign and malformed SQL allowance records leave the default at three',async()=>{
+      for(const overrides of [{utcDay:'2000-01-01'},{expiresAt:'not-a-date'},{expiresAt:'2099-01-01T00:00:00.000Z'},{ownerId:'mallory'},{dailyLimit:6},{dailyLimit:'5'},{schemaVersion:2},{extra:true}]){
+        await reset();await seedTestAllowance('alice',overrides);
+        for(let i=0;i<3;i++){const c=await store.createCheck('alice',input,String(i));await store.deleteCheck('alice',c.id);}
+        await assert.rejects(store.createCheck('alice',input,'fourth'),/owner_daily_quota/);
+      }
+    });
     await run('terminal SQL storage paths finish running stages and skip unstarted work atomically',async()=>{
       for(const action of ['queued_cancel','cancel','deadline_read','deadline_admission','deadline_purge','delete','terminal_failed','terminal_canceled','expiry']){
         await reset();const c=await store.createCheck('alice',input,action),oldFinish='2026-11-08T11:59:59.000Z';let current=c;

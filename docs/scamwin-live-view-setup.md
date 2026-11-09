@@ -55,6 +55,10 @@ This browser test intercepts synthetic check, session and image responses. It te
 
 ## Privacy and lifecycle
 
+### Temporary testing allowance
+
+The standard account allowance stays at three checks per UTC day. An operator can grant a named account a total of five checks for the current UTC day, expiring automatically at the next daily reset. This is an exact owner-bound record in the existing private configuration table, validated inside the normal admission transaction. Repeating a grant keeps the total at five. Previous checks, including canceled or deleted checks, remain counted. The global limits of ten daily and fifty monthly checks continue to apply. There is no public endpoint for granting an allowance and no extra Vercel setting or API key.
+
 The worker mints a locator from the same page CDP session it already uses for evidence collection. Watch-only options disable interaction, browser controls and remote resizing. The app authenticates the owner before decrypting a locator, verifies the expected run and generation, and refuses expired or inactive collection sessions. A dedicated AES-GCM key binds each ciphertext to its owner, check, run, generation, session and expiry.
 
 The browser retains its existing 60-second budget. The viewer never pads an investigation or extends that budget. Browser closure retires the locator. Cancellation, deletion, terminal runs and cleanup remove or retire stored capabilities. Viewer failures do not replace collected evidence or stop the later assessment. Warning sharing remains optional and requires selected evidence, explicit consent and reviewer approval.

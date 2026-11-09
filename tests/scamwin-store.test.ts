@@ -7,6 +7,39 @@ import type { CheckInput, Observation } from "../lib/scamwin/contracts";
 const input: CheckInput = { url: "https://example.org/", message: "An offer", promisedBenefit: "Refund", intendedAction: "Receive money", images: [] };
 const makeStore = () => new MemoryStore({ now: () => new Date("2026-11-08T12:00:00.000Z"), initialRoles: [{ ownerId: "reviewer", role: "reviewer" }] });
 
+const testAllowance = { schemaVersion: 1 as const, ownerId: 'alice', dailyLimit: 5 as const, utcDay: '2026-11-08', expiresAt: '2026-11-09T00:00:00.000Z' };
+test('temporary owner allowance permits five durable admissions while other accounts retain three', async () => {
+  const store = new MemoryStore({ now: () => new Date('2026-11-08T12:00:00.000Z'), dailyCheckAllowances: [testAllowance] });
+  for (let i = 0; i < 5; i++) { const check = await store.createCheck('alice', input, `allowance-${i}`); await store.deleteCheck('alice', check.id); }
+  assert.equal((await store.listChecks('alice', {})).total, 0);
+  await assert.rejects(store.createCheck('alice', input, 'sixth'), /owner_daily_quota/);
+  for (let i = 0; i < 3; i++) { const check = await store.createCheck('bob', input, `normal-${i}`); await store.deleteCheck('bob', check.id); }
+  await assert.rejects(store.createCheck('bob', input, 'fourth'), /owner_daily_quota/);
+});
+test('temporary allowances expire at UTC rollover and malformed records never raise the default', async () => {
+  for (const record of [
+    { ...testAllowance, dailyLimit: 6 }, { ...testAllowance, schemaVersion: 2 },
+    { ...testAllowance, expiresAt: '2026-11-10T00:00:00.000Z' }, { ...testAllowance, utcDay: '2026-11-07' },
+    { ...testAllowance, extra: true },
+  ]) {
+    const store = new MemoryStore({ now: () => new Date('2026-11-08T12:00:00.000Z'), dailyCheckAllowances: [record as never] });
+    for (let i = 0; i < 3; i++) { const check = await store.createCheck('alice', input, `${i}`); await store.deleteCheck('alice', check.id); }
+    await assert.rejects(store.createCheck('alice', input, 'fourth'), /owner_daily_quota/);
+  }
+  let now = new Date('2026-11-08T23:59:58.000Z');
+  const store = new MemoryStore({ now: () => now, dailyCheckAllowances: [testAllowance] });
+  for (let i = 0; i < 5; i++) { const check = await store.createCheck('alice', input, `before-${i}`); await store.deleteCheck('alice', check.id); }
+  now = new Date('2026-11-09T00:00:00.000Z');
+  for (let i = 0; i < 3; i++) { const check = await store.createCheck('alice', input, `after-${i}`); await store.deleteCheck('alice', check.id); }
+  await assert.rejects(store.createCheck('alice', input, 'expired-fourth'), /owner_daily_quota/);
+});
+test('a test allowance never expands the global daily admission budget', async () => {
+  const store = new MemoryStore({ now: () => new Date('2026-11-08T12:00:00.000Z'), dailyCheckAllowances: [testAllowance] });
+  for (let i = 0; i < 5; i++) { const check = await store.createCheck('alice', input, `alice-${i}`); await store.deleteCheck('alice', check.id); }
+  for (let i = 0; i < 5; i++) { const owner = `other-${i}`, check = await store.createCheck(owner, input, 'first'); await store.deleteCheck(owner, check.id); }
+  await assert.rejects(store.createCheck('another-owner', input, 'eleventh'), /global_daily_quota/);
+});
+
 test("terminal storage paths finish interrupted stages without inventing completed work",async()=>{
   for(const action of ["queued_cancel","cancel","deadline_read","deadline_admission","deadline_purge","delete","terminal_failed","terminal_canceled","expiry"] as const){
     let now=new Date("2026-11-08T12:00:00.000Z");const store=new MemoryStore({now:()=>now}),c=await store.createCheck("alice",input,action);
