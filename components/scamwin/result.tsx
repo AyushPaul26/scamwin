@@ -18,20 +18,23 @@ import { DecisionComparison } from "./decision-comparison";
 import { EvidenceRecord, FindingEvidence, type EvidenceArtifact } from "./finding-evidence";
 import { LiveInspection } from "./live-inspection";
 import { InvestigationProgress } from "./investigation-progress";
+import type { OfficialVerificationView } from "@/lib/scamwin/official-verification-contracts";
+import { OfficialVerification } from "./official-verification";
 
-export type Detail = { check: CheckRecord; observations: Observation[]; artifacts: EvidenceArtifact[]; liveView?: SanitizedLiveViewStatus; messages: CheckMessage[]; relatedCases: RelatedCase[]; synthetic?: boolean; scenarios?: { id: string; label: string }[]; warningSubmissions?: { id: string; status: string; createdAt: string; reviewReason?: string }[] };
+export type Detail = { officialVerification?: OfficialVerificationView; check: CheckRecord; observations: Observation[]; artifacts: EvidenceArtifact[]; liveView?: SanitizedLiveViewStatus; messages: CheckMessage[]; relatedCases: RelatedCase[]; synthetic?: boolean; scenarios?: { id: string; label: string }[]; warningSubmissions?: { id: string; status: string; createdAt: string; reviewReason?: string }[] };
 const terminal = new Set(["completed", "partial", "blocked", "failed", "canceled"]);
 const riskLabels = { high_risk: "This action carries a high risk.", needs_caution: "Take a closer look before you act.", no_observed_red_flags: "No red flags in the completed checks.", inconclusive: "There isn’t enough evidence to decide." };
 
 export function CheckDetail({ id }: { id: string }) { return <Gate><DetailLoader id={id} /></Gate>; }
 function DetailLoader({ id }: { id: string }) {
   const [data, setData] = useState<Detail | null>(null); const [error, setError] = useState(""); const [attempt, setAttempt] = useState(0);
+  const [officialStepUnavailable, setOfficialStepUnavailable] = useState(false);
   const revision = useRef(-1); const recordId = useRef(id);
   useEffect(() => {
     const controller = new AbortController(); let timer: ReturnType<typeof setTimeout>; let stopped = false; let failures = 0; let inFlight = false;
     async function poll() {
       if (inFlight || stopped) return; inFlight = true;
-      try { const response = await fetch(`/api/scamwin/checks/${encodeURIComponent(id)}`, { cache: "no-store", signal: controller.signal }); if (!response.ok) { const payload = await response.json().catch(() => ({})); throw new Error(response.status === 401 ? "Your session expired. Sign in again to view this check." : response.status === 404 ? "This check could not be found. It may have expired or been deleted." : payload.error || "The check could not be loaded."); } const next: Detail = await response.json(); failures = 0; if (next.check.id !== id || stopped) return; if (next.check.revision >= revision.current) { revision.current = next.check.revision; setData(next); setError(""); if (terminal.has(next.check.state)) stopped = true; } if (!stopped) timer = setTimeout(poll, document.hidden ? 10000 : 2000); }
+      try { const response = await fetch(`/api/scamwin/checks/${encodeURIComponent(id)}`, { cache: "no-store", signal: controller.signal }); if (!response.ok) { const payload = await response.json().catch(() => ({})); throw new Error(response.status === 401 ? "Your session expired. Sign in again to view this check." : response.status === 404 ? "This check could not be found. It may have expired or been deleted." : payload.error || "The check could not be loaded."); } const next: Detail = await response.json(); failures = 0; if (next.check.id !== id || stopped) return; if (next.check.revision >= revision.current) { revision.current = next.check.revision; setData(next); setOfficialStepUnavailable(new URLSearchParams(window.location.search).get("officialStep") === "unavailable"); setError(""); if (terminal.has(next.check.state)) stopped = true; } if (!stopped) timer = setTimeout(poll, document.hidden ? 10000 : 2000); }
       catch (e) { if (controller.signal.aborted) return; setError(e instanceof Error ? e.message : "Connection interrupted."); if (++failures < 3 && !stopped) timer = setTimeout(poll, 10000); }
       finally { inFlight = false; }
     }
@@ -41,7 +44,7 @@ function DetailLoader({ id }: { id: string }) {
     return () => { stopped = true; clearTimeout(timer); controller.abort(); document.removeEventListener("visibilitychange", visible); };
   }, [id, attempt]);
   if (!data || data.check.id !== id) return error ? <><Notice title="This check is unavailable" error>{error}</Notice><div className="sw-inline-actions"><Button className="sw-btn sw-btn-outline" onClick={() => setAttempt(a => a + 1)}>Try again</Button><Link className="sw-text-link" href="/checks">Back to my checks</Link></div></> : <Loading label="Opening your private check…" />;
-  return <>{error && <Notice title="Updates interrupted" error>{error} The last received result is shown. <Button className="sw-btn sw-btn-outline" onClick={() => setAttempt(a => a + 1)}>Reconnect</Button></Notice>}<ResultView data={data} reload={() => setAttempt(a => a + 1)} /></>;
+  return <>{error && <Notice title="Updates interrupted" error>{error} The last received result is shown. <Button className="sw-btn sw-btn-outline" onClick={() => setAttempt(a => a + 1)}>Reconnect</Button></Notice>}{officialStepUnavailable && <Notice title="This official next step is unavailable.">The link may have expired or its source review may have changed. No other destination was opened. Review the saved sources below or start a new check.</Notice>}<ResultView data={data} reload={() => setAttempt(a => a + 1)} /></>;
 }
 
 export function ResultView({ data, demo = false, reload = () => {} }: { data: Detail; demo?: boolean; reload?: () => void }) {
@@ -67,6 +70,7 @@ export function ResultView({ data, demo = false, reload = () => {} }: { data: De
       <aside className="sw-progress-panel sw-panel"><InvestigationProgress stages={check.stages} createdAt={check.createdAt} finishedAt={active ? undefined : check.updatedAt} />{!check.input.url && active && <Button className="sw-btn sw-btn-outline" disabled={pending || check.state === "cancel_requested"} onClick={() => mutate("cancel")}>{check.state === "cancel_requested" ? "Cancellation requested" : "Cancel check"}</Button>}</aside>
     </section>}
     <DecisionComparison comparison={comparison} observations={observations} />
+    {data.officialVerification && <OfficialVerification checkId={check.id} verification={data.officialVerification} observations={observations} />}
     {check.intent?.uncertainties.length ? <p className="sw-small-copy sw-comparison-uncertainty">Still uncertain: {check.intent.uncertainties.join(" ")}</p> : null}
     <div className="sw-result-grid"><div><section className="sw-section sw-panel"><div className="sw-section-head"><h2>What the evidence says</h2><span className="sw-small-copy">{assessment?.findings.length || 0} findings</span></div>{assessment?.findings.length ? <ol className="sw-findings">{assessment.findings.map(finding => <FindingEvidence key={finding.id} finding={finding} observations={observations} />)}</ol> : <p>{active ? "Findings will appear after available evidence has been assessed." : "No validated findings are available for this check."}</p>}</section>
     <section className="sw-section sw-panel"><div className="sw-section-head"><h2>Evidence & sources</h2><span className="sw-small-copy">{observations.length} records</span></div>{observations.length ? observations.map((observation, index) => <EvidenceRecord key={observation.id} observation={observation} number={index + 1} artifacts={data.artifacts} demo={demo} />) : <p>No observations have been recorded yet.</p>}</section>

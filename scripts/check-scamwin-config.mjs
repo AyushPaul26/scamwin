@@ -13,5 +13,6 @@ const groups = {
   publisherWorkerOnly: ['SCAMWIN_PUBLISHER_PRIVATE_KEY'],
 };
 for (const [group, keys] of Object.entries(groups)) console.log(`${group}: ${keys.map(key => `${key}=${process.env[key] ? 'present' : 'missing'}`).join(', ')}`);
+console.log(`official sources: ${process.env.SCAMWIN_OFFICIAL_VERIFICATION_ENABLED === 'true' ? 'enabled' : 'disabled'}; reviewed catalogue only, no provider key required`);
 console.log('Presence only; no credentials, service connections, purchases or deployments are tested.');
 if (Object.keys(process.env).some(key => key.startsWith('NEXT_PUBLIC_') && /SECRET|TOKEN|PRIVATE_KEY|DATABASE_URL/.test(key))) { console.error('A sensitive-looking public variable name is configured. Remove its NEXT_PUBLIC_ prefix.'); process.exitCode = 1; }

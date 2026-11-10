@@ -7,7 +7,7 @@ export const risks = ["high_risk", "needs_caution", "no_observed_red_flags", "in
 export type Risk = (typeof risks)[number];
 export type ImageMediaType = "image/jpeg" | "image/png" | "image/webp";
 export type PreparedImage = { name: string; mediaType: ImageMediaType; dataUrl: string };
-export type CheckInput = { url: string; message: string; promisedBenefit: string; intendedAction: string; images: PreparedImage[] };
+export type CheckInput = { url: string; message: string; promisedBenefit: string; intendedAction: string; images: PreparedImage[]; claimedCompany?: string; offerReference?: string };
 export const offerIntentSchema = z.object({
   promisedBenefit: z.string().max(3000).nullable(), claimedOrganization: z.string().max(500).nullable(),
   intendedAction: z.string().max(3000).nullable(), requestedActions: z.array(z.string().max(1000)).max(20),

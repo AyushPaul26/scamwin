@@ -66,3 +66,21 @@ test('config checker keeps public secrets an error', () => {
   assert.match(result.stderr, /sensitive-looking public variable/);
   assert.doesNotMatch(result.stdout + result.stderr, /never-print-this/);
 });
+
+test('official verification is optional, default-off and never changes basic app readiness', () => {
+  const base = { ...web, DATABASE_URL: 'private-database-marker', SCAMWIN_INVESTIGATION_BACKEND: 'vercel' };
+  const disabled = scamwinReadiness(base);
+  assert.equal(disabled.configured, true);
+  assert.equal(disabled.readiness.find(item => item.id === 'official_sources')?.status, 'missing');
+  const enabled = scamwinReadiness({ ...base, SCAMWIN_OFFICIAL_VERIFICATION_ENABLED: 'true' });
+  assert.equal(enabled.configured, true);
+  assert.match(enabled.readiness.find(item => item.id === 'official_sources')?.message ?? '', /reviewed|catalogue/i);
+  assert.doesNotMatch(JSON.stringify(enabled), /client-secret|private-database-marker/);
+});
+
+test('official configuration reports feature status without demanding a provider key or making lookups', () => {
+  const result = checkConfig({ SCAMWIN_INVESTIGATION_BACKEND: 'vercel', SCAMWIN_OFFICIAL_VERIFICATION_ENABLED: 'true' });
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /official sources: enabled/);
+  assert.doesNotMatch(result.stdout, /GREENHOUSE_API_KEY|SEARCH_API_KEY/);
+});

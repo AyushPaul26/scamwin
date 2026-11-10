@@ -23,9 +23,9 @@ function fixture() {
   return { store, writes, read: () => record, replace: (patch: Partial<CheckRecord>) => { record = { ...record, ...patch }; } };
 }
 
-test('initial stages describe the six actual operations without fabricated start times', () => {
+test('initial stages describe the seven actual operations without fabricated start times', () => {
   const stages = createInitialStages();
-  assert.deepEqual(stages.map(s => s.id), ['intake', 'browser', 'trust', 'registry', 'comparison', 'assessment']);
+  assert.deepEqual(stages.map(s => s.id), ['intake', 'browser', 'trust', 'registry', 'official', 'comparison', 'assessment']);
   assert.ok(stages.every(s => s.status === 'pending' && !s.startedAt && !s.finishedAt));
 });
 

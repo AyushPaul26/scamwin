@@ -61,7 +61,7 @@ try {
   assert.ok((await page.locator("#offer-images").boundingBox()).width <= 1, "The native file input stays visually hidden behind its accessible picker");
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1), false, "The signed-in form fits the mobile viewport");
   await page.getByRole("button", { name: "Check this offer" }).click();
-  await page.getByText("Add a link, message or screenshot to check.", { exact: true }).waitFor();
+  await page.getByText("Add a link, message, public reference or screenshot to check.", { exact: true }).waitFor();
   assert.equal(await page.locator("#offer-message").evaluate(el => el === document.activeElement), true, "First invalid field receives focus");
   await page.getByLabel("Offer link", { exact: false }).fill("http://localhost/private");
   await page.getByRole("button", { name: "Check this offer" }).click();

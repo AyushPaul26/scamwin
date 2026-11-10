@@ -178,7 +178,7 @@ export class MemoryStore implements ScamwinStore {
   async getInternalCheck(id: string) { return this.view(this.read(id)); }
   async listChecks(ownerId: string, options: { page?: number; query?: string }): Promise<CheckPage> {
     identity(ownerId); const page = Math.max(1, Math.floor(options.page ?? 1)), pageSize = 20, query = (options.query ?? "").slice(0, 200).toLowerCase();
-    const checks = [...this.checks.values()].filter((c) => this.read(c.id, ownerId) && JSON.stringify([c.input.url, c.input.message, c.input.promisedBenefit, c.input.intendedAction]).toLowerCase().includes(query)).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    const checks = [...this.checks.values()].filter((c) => this.read(c.id, ownerId) && JSON.stringify([c.input.url, c.input.message, c.input.promisedBenefit, c.input.intendedAction, c.input.claimedCompany ?? '', c.input.offerReference ?? '']).toLowerCase().includes(query)).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
     return { checks: checks.slice((page - 1) * pageSize, page * pageSize).map((c) => this.view(c)!), total: checks.length, page, pageSize };
   }
   async claimRun(id: string, generation: number) {
@@ -491,7 +491,7 @@ export class PostgresStore implements ScamwinStore {
   async getInternalCheck(id: string) { await this.expireOverdue(undefined, id); const rows = await this.sql`SELECT record FROM scamwin_checks WHERE id=${id} AND deleted_at IS NULL AND expires_at>now()`; return this.view((rows[0]?.record as CheckRecord) ?? null); }
   async listChecks(ownerId: string, options: { page?: number; query?: string }): Promise<CheckPage> {
     identity(ownerId); await this.expireOverdue(ownerId); const page = Math.max(1, Math.floor(options.page ?? 1)), query = (options.query ?? "").slice(0, 200).toLowerCase();
-    const result = await this.sql`WITH matches AS (SELECT record,created_at FROM scamwin_checks WHERE owner_id=${ownerId} AND deleted_at IS NULL AND expires_at>now() AND position(${query} in lower(concat_ws(' ',record->'input'->>'url',record->'input'->>'message',record->'input'->>'promisedBenefit',record->'input'->>'intendedAction')))>0)
+    const result = await this.sql`WITH matches AS (SELECT record,created_at FROM scamwin_checks WHERE owner_id=${ownerId} AND deleted_at IS NULL AND expires_at>now() AND position(${query} in lower(concat_ws(' ',record->'input'->>'url',record->'input'->>'message',record->'input'->>'promisedBenefit',record->'input'->>'intendedAction',record->'input'->>'claimedCompany',record->'input'->>'offerReference')))>0)
       SELECT (SELECT count(*) FROM matches)::int AS total, COALESCE((SELECT jsonb_agg(record) FROM (SELECT record FROM matches ORDER BY created_at DESC LIMIT 20 OFFSET ${(page - 1) * 20}) p),'[]'::jsonb) AS checks`;
     return { checks: await Promise.all((result[0].checks as CheckRecord[]).map(async (c) => (await this.view(c))!)), total: Number(result[0].total), page, pageSize: 20 };
   }

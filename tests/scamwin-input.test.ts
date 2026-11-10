@@ -19,6 +19,18 @@ test("URL input accepts only a single credential-free public HTTP destination", 
   for (const url of ["file:///etc/passwd", "https://a:b@example.org/", "http://localhost/", "http://127.0.0.1/", "http://[::1]/", "http://169.254.169.254/", "https://example.org:3000/", "https://example.org/\nhttps://other.org/"]) assert.equal(checkInputSchema.safeParse({ ...empty, url }).success, false, url);
 });
 
+test("optional company and public reference fields preserve minimal input and enforce shared text limits", () => {
+  assert.deepEqual(checkInputSchema.parse({ ...empty, message: "hello" }), { ...empty, message: "hello" });
+  assert.equal(checkInputSchema.parse({ ...empty, claimedCompany: " Acme ", offerReference: " 12345 " }).offerReference, "12345");
+  assert.equal(checkInputSchema.safeParse({ ...empty, offerReference: "https://acme.example/careers/jobs/42" }).success, true);
+  assert.equal(checkInputSchema.safeParse({ ...empty, claimedCompany: "Acme" }).success, false);
+  assert.equal(checkInputSchema.safeParse({ ...empty, message: "hello", claimedCompany: "a".repeat(201) }).success, false);
+  assert.equal(checkInputSchema.safeParse({ ...empty, offerReference: "a".repeat(4097) }).success, false);
+  assert.equal(checkInputSchema.safeParse({ ...empty, message: "a".repeat(11900), claimedCompany: "b".repeat(100) }).success, true);
+  assert.equal(checkInputSchema.safeParse({ ...empty, message: "a".repeat(11900), claimedCompany: "b".repeat(101) }).success, false);
+  assert.equal(checkInputSchema.safeParse({ ...empty, message: "a".repeat(11999), offerReference: "12" }).success, false);
+});
+
 test("prepared image type, signature, base64 and decoded byte cap are enforced", () => {
   assert.equal(validatePreparedImage(png).byteLength, 24);
   for (const image of [{ ...png, mediaType: "image/jpeg" }, { ...png, dataUrl: "data:image/png;base64,hello" }, { ...png, dataUrl: "data:image/svg+xml;base64,PHN2Zz4=" }, { ...png, dataUrl: "data:image/png;base64," + Buffer.concat([Buffer.from("89504e470d0a1a0a", "hex"), Buffer.alloc(160 * 1024)]).toString("base64") }]) assert.throws(() => validatePreparedImage(image));

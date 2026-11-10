@@ -5,7 +5,7 @@ import { CheckCircle2, Circle, CircleMinus, LoaderCircle, XCircle } from "lucide
 import type { CheckStage } from "@/lib/scamwin/contracts";
 import { dateLabel } from "./core";
 
-const stagesInOrder = ["intake", "browser", "trust", "registry", "comparison", "assessment"];
+const stagesInOrder = ["intake", "browser", "trust", "registry", "official", "comparison", "assessment"];
 const statuses: Record<CheckStage["status"], string> = { pending: "Waiting", running: "In progress", completed: "Completed", unavailable: "Unavailable", blocked: "Blocked", skipped: "Skipped", canceled: "Canceled" };
 const details: Record<string, string> = {
   load_client: "Preparing the browser", connect_browser: "Connecting to the browser", create_context: "Preparing a private page",

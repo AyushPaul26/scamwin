@@ -8,7 +8,7 @@ const input: CheckInput = { url: 'https://scamwin.vercel.app/lab/refund-checkpoi
 const env = { SCAMWIN_LIVE_VIEW_ENABLED: 'true', SCAMWIN_LIVE_VIEW_ENCRYPTION_KEY: '11'.repeat(32), BROWSERLESS_BASE_URL: 'https://production-sfo.browserless.io', SCAMWIN_INDICATOR_HMAC_SECRET: '22'.repeat(32) };
 const intent = { promisedBenefit: 'Refund', claimedOrganization: null, intendedAction: 'send_money', requestedActions: [], extractedCandidates: [], uncertainties: [] };
 
-test('pipeline persists a private live capability only during the real browser stage and records six timed stages', async () => {
+test('pipeline persists a private live capability only during the real browser stage and skips disabled official collection', async () => {
   const store = new MemoryStore(), check = await store.createCheck('owner', input, 'live');
   const scope = { ownerId: 'owner', checkId: check.id, runId: check.runId, generation: 1 };
   const observation = (kind: string, data: Observation['data']): Observation => ({ id: kind, checkId: check.id, runId: check.runId, kind, data, sourceKind: 'live_page', sourceRef: input.url, status: 'observed', observedAt: new Date().toISOString(), collectorVersion: 'test', policyVersion: 'test' });
@@ -34,8 +34,12 @@ test('pipeline persists a private live capability only during the real browser s
   const final = (await store.getCheck('owner', check.id))!;
   assert.equal(final.state, 'completed');
   assert.equal(final.assessment?.risk, 'high_risk'); // The submitted intention remains authoritative.
-  assert.deepEqual(final.stages.map(stage => stage.id), ['intake', 'browser', 'trust', 'registry', 'comparison', 'assessment']);
-  assert.ok(final.stages.every(stage => stage.status === 'completed' && stage.startedAt && stage.finishedAt));
+  assert.deepEqual(final.stages.map(stage => stage.id), ['intake', 'browser', 'trust', 'registry', 'official', 'comparison', 'assessment']);
+  assert.ok(final.stages.filter(stage => stage.id !== 'official').every(stage => stage.status === 'completed' && stage.startedAt && stage.finishedAt));
+  const official = final.stages.find(stage => stage.id === 'official')!;
+  assert.equal(official.status, 'skipped');
+  assert.equal(official.startedAt, undefined);
+  assert.equal(official.finishedAt, undefined);
   assert.doesNotMatch(JSON.stringify(final) + JSON.stringify(await store.listObservations('owner', check.id)), /private-viewer|encryptedLocator|provider-id/);
 });
 

@@ -49,3 +49,19 @@ test('unknown or unauthorized evidence references cannot enter a saved explanati
   const result = assessEvidence(input, [observation('known', 'page', { text: 'An offer' })]);
   assert.throws(() => validateAssessmentEvidence({ ...result, findings: [{ id: 'invented', statement: 'Proven scam', classification: 'observation', evidenceIds: ['absent'] }] }, ['known']));
 });
+
+test('official offer differences are cited inferences; source matches cannot clear action risk', () => {
+  const official = { ...observation('official-offer', 'official_offer', { schemaVersion: 1, catalogVersion: 'test', companyId: 'company', reasonCode: 'title_differs', offerStatus: 'details_differ', sourceId: 'source', referenceKind: 'greenhouse_post_id', referenceValue: '12345', title: 'Software Engineer', location: null, validThrough: null, canonicalListingUrl: 'https://job-boards.greenhouse.io/company/jobs/12345', quote: 'Software Engineer', differingFields: ['title'], basedOnEvidenceIds: [] }), sourceKind: 'official_source' as const };
+  const result = assessEvidence(input, [official]);
+  assert.equal(result.risk, 'needs_caution');
+  assert.ok(result.findings.some(item => item.classification === 'inference' && item.evidenceIds.includes(official.id)));
+  const matched = { ...official, data: { ...official.data, offerStatus: 'matched_public_reference', differingFields: [] } };
+  assert.equal(assessEvidence(input, [matched, observation('payment', 'payment_action', { direction: 'outgoing', recipient: 'test@example', selectedCheckpoint: true })]).risk, 'high_risk');
+});
+
+test('missing, closed and unavailable official offers do not alone establish fraud', () => {
+  for (const status of ['not_found_in_checked_source', 'explicitly_closed', 'unavailable', 'reference_needed']) {
+    const item = { ...observation('offer', 'official_offer', { offerStatus: status }), sourceKind: 'official_source' as const };
+    assert.notEqual(assessEvidence(input, [item]).risk, 'high_risk');
+  }
+});

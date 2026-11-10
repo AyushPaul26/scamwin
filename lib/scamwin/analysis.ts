@@ -1,5 +1,6 @@
 import { assessmentSchema, type Assessment, type CheckInput, type Observation, type OfferIntent } from './contracts';
 import { extractUrlSignals } from './policy';
+import { officialOfferDataSchema, officialVerificationDataSchema } from './official-verification-contracts';
 
 export function assessEvidence(input: CheckInput, observations: readonly Observation[], intent?: OfferIntent): Assessment {
   const observed = observations.filter(item => item.status === 'observed');
@@ -14,6 +15,17 @@ export function assessEvidence(input: CheckInput, observations: readonly Observa
   if (payment && receivingOnly) findings.push({ id: 'payment-direction', statement: `The selected action requests an outgoing payment to ${payment.data.recipient}, while your stated intention is to receive money. This establishes the direction of that action, not the identity or guilt of the recipient.`, classification: 'observation', evidenceIds: [payment.id] });
   if (warning) findings.push({ id: 'publisher-warning', statement: `An active warning for this exact hostname was observed from ${String(warning.data.publisher ?? 'a configured publisher')}. It is a publisher assertion, not a blockchain guarantee of fraud.`, classification: 'observation', evidenceIds: [warning.id] });
   for (const item of observed) {
+    if (item.kind === 'official_offer' && item.sourceKind === 'official_source') {
+      const fact = officialOfferDataSchema.safeParse(item.data);
+      if (fact.success && fact.data.offerStatus === 'details_differ') {
+        caution = true;
+        findings.push({ id: `official-difference-${item.id}`, statement: 'The identified official listing has different role or location details from the submitted claim. Review the cited source independently; this difference does not establish fraud or authenticate the sender.', classification: 'inference', evidenceIds: [item.id, ...fact.data.basedOnEvidenceIds] });
+      }
+      if (fact.success && fact.data.offerStatus === 'explicitly_closed') {
+        caution = true;
+        findings.push({ id: `official-closed-${item.id}`, statement: 'The checked public listing explicitly indicates closure or a deadline that has passed. Confirm current availability through the official route before acting.', classification: 'observation', evidenceIds: [item.id, ...fact.data.basedOnEvidenceIds] });
+      }
+    }
     if (item.kind === 'semantic_mismatch' || item.kind === 'sensitive_request' || item.kind === 'identity_mismatch') {
       caution = true;
       findings.push({ id: `concern-${item.id}`, statement: String(item.data.description ?? 'A requested action needs independent verification.'), classification: 'inference', evidenceIds: [item.id] });
@@ -33,7 +45,15 @@ export function assessEvidence(input: CheckInput, observations: readonly Observa
   if (!tls || tls.data.valid !== true) missingChecks.push('Origin HTTPS validation was not successfully completed.');
   if (!find('action_review') || find('action_review')?.data.complete !== true) missingChecks.push('Relevant requested actions could not all be reviewed.');
   if (!observed.some(item => item.kind === 'registry_lookup' && item.sourceKind === 'registry' && item.data.fresh === true)) missingChecks.push('A fresh shared-warning lookup is unavailable.');
-  if (intent?.claimedOrganization && !observed.some(item => item.kind === 'official_identity' && item.sourceKind === 'official_source' && item.data.verified === true)) missingChecks.push('The claimed organization has not been independently confirmed from a curated official source.');
+  const officialSummary = observations.find(item => item.kind === 'official_verification' && item.sourceKind === 'official_source');
+  const official = officialSummary ? officialVerificationDataSchema.safeParse(officialSummary.data) : null;
+  if (official?.success) {
+    if (official.data.companyStatus !== 'recognized' && official.data.companyStatus !== 'not_claimed') missingChecks.push('A current reviewed official source for the claimed company was not resolved.');
+    if (!['matched_public_reference', 'details_differ', 'explicitly_closed', 'not_applicable'].includes(official.data.offerStatus)) missingChecks.push('The exact offer has not been confirmed in a checked public official source. See the company and offer verification coverage.');
+  } else if (intent?.claimedOrganization || input.claimedCompany) {
+    if (!observed.some(item => item.kind === 'official_identity' && item.sourceKind === 'official_source' && item.data.verified === true)) missingChecks.push('The claimed organization has not been independently confirmed from a curated official source.');
+  }
+  if (observations.some(item => item.kind === 'official_verification_failure')) missingChecks.push('Official-source verification was unavailable. No company or offer confirmation was made.');
   for (const item of observations.filter(item => ['blocked', 'unavailable', 'not_checked'].includes(item.status))) {
     const description = typeof item.data.reason === 'string' ? item.data.reason : `${item.kind} was ${item.status.replaceAll('_', ' ')}.`;
     if (!missingChecks.includes(description)) missingChecks.push(description);

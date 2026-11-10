@@ -5,6 +5,7 @@ export const investigationStages = [
   ['browser', 'Observing the website'],
   ['trust', 'Checking the connection'],
   ['registry', 'Checking shared warnings'],
+  ['official', 'Checking official sources'],
   ['comparison', 'Comparing promise and request'],
   ['assessment', 'Preparing your result'],
 ] as const;

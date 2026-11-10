@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { PreparedImage } from "./contracts";
 
-export const INPUT_LIMITS = { url: 4096, text: 12000, images: 4, sourceImageBytes: 10 * 1024 * 1024, preparedImageBytes: 160 * 1024 } as const;
+export const INPUT_LIMITS = { url: 4096, text: 12000, claimedCompany: 200, offerReference: 4096, images: 4, sourceImageBytes: 10 * 1024 * 1024, preparedImageBytes: 160 * 1024 } as const;
 export function isPublicInputUrl(value: string): boolean {
   if (/\s/.test(value)) return false;
   try {
@@ -34,8 +34,10 @@ export const checkInputSchema = z.object({
   url: z.string().trim().max(INPUT_LIMITS.url).refine((v) => !v || isPublicInputUrl(v), "Enter one public HTTP or HTTPS link without credentials or a custom port."),
   message: z.string().trim().max(INPUT_LIMITS.text), promisedBenefit: z.string().trim().max(INPUT_LIMITS.text), intendedAction: z.string().trim().max(INPUT_LIMITS.text),
   images: z.array(preparedImageSchema).max(INPUT_LIMITS.images),
+  claimedCompany: z.string().trim().max(INPUT_LIMITS.claimedCompany).optional(),
+  offerReference: z.string().trim().max(INPUT_LIMITS.offerReference).optional(),
 }).strict().superRefine((value, ctx) => {
-  if (![value.url, value.message, value.promisedBenefit, value.intendedAction].some(Boolean) && !value.images.length) ctx.addIssue({ code: "custom", path: ["message"], message: "Add a link, message or screenshot to check." });
-  if (value.message.length + value.promisedBenefit.length + value.intendedAction.length > INPUT_LIMITS.text) ctx.addIssue({ code: "custom", path: ["message"], message: "Keep the combined offer text within 12,000 characters." });
+  if (![value.url, value.message, value.promisedBenefit, value.intendedAction, value.offerReference].some(Boolean) && !value.images.length) ctx.addIssue({ code: "custom", path: ["message"], message: "Add a link, message, public reference or screenshot to check." });
+  if (value.message.length + value.promisedBenefit.length + value.intendedAction.length + (value.claimedCompany?.length ?? 0) + (value.offerReference?.length ?? 0) > INPUT_LIMITS.text) ctx.addIssue({ code: "custom", path: ["message"], message: "Keep the combined offer text within 12,000 characters." });
 });
 export const parseCheckInput = (value: unknown) => checkInputSchema.parse(value);

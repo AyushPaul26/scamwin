@@ -9,9 +9,12 @@ import { findRelatedCases } from './correlation';
 import { createProgressWriter, finishInterruptedStages } from './progress';
 import { sealLiveViewLocator } from './live-view-crypto';
 import { isApprovedLiveViewUrl } from './live-view-provider';
+import { verifyOfficialOffer } from './official-verification';
+import { officialCatalog } from './official-source-catalog';
+import { readOfficialSource } from './official-source-reader';
 
 type LookupResult = { status: string; message: string; chainId: number; checkedAt?: string; warnings: { publisher: string; active: boolean; fresh: boolean; trusted: boolean; category: number; revision: number; expiresAt: string }[] };
-type Dependencies = { env?: Record<string, string | undefined>; signal?: AbortSignal; extract?: typeof extractOfferIntent; collect?: typeof collectWebsite; probe?: typeof probeOrigin; compare?: typeof compareOfferWithEvidence; lookup?: (hostname: string) => Promise<LookupResult> };
+type Dependencies = { env?: Record<string, string | undefined>; signal?: AbortSignal; extract?: typeof extractOfferIntent; collect?: typeof collectWebsite; probe?: typeof probeOrigin; compare?: typeof compareOfferWithEvidence; lookup?: (hostname: string) => Promise<LookupResult>; verifyOfficial?: typeof verifyOfficialOffer };
 /** Only identifiers enter the durable job payload. All private content is loaded here. */
 export async function runInvestigation(checkId: string, generation: number, store: ScamwinStore, dependencies: Dependencies = {}) {
   const env = dependencies.env ?? process.env;
@@ -21,6 +24,7 @@ export async function runInvestigation(checkId: string, generation: number, stor
   const check = await store.claimRun(checkId, generation);
   if (!check) return; // Duplicate delivery cannot acquire a second run.
   const ownerId = check.ownerId, source = { checkId, runId: check.runId };
+  const pipelineDeadlineAtMs = Date.now() + 240_000;
   const controller = new AbortController(), signal = AbortSignal.any([controller.signal, AbortSignal.timeout(240_000), ...(dependencies.signal ? [dependencies.signal] : [])]);
   const progress = createProgressWriter(checkId, generation, store, { signal });
   const liveScope = { ownerId, checkId, runId: check.runId, generation };
@@ -106,11 +110,25 @@ export async function runInvestigation(checkId: string, generation: number, stor
       for (const warning of registry.warnings) await add([{ ...source, id: randomUUID(), kind: 'registry_warning', status: 'observed', sourceKind: 'registry', sourceRef: 'base-sepolia:84532', observedAt: registry.checkedAt ?? new Date().toISOString(), data: { ...warning }, collectorVersion: 'scamwin-registry-1', policyVersion: 'scamwin-fixture-v1' }]);
     }
     await progress.finishStage('registry', !check.input.url ? 'skipped' : registryAvailable ? 'completed' : 'unavailable');
+    if (env.SCAMWIN_OFFICIAL_VERIFICATION_ENABLED === 'true') {
+      await progress.beginStage('official');
+      try {
+        const official = await (dependencies.verifyOfficial ?? verifyOfficialOffer)({ input: check.input, intent: intent ?? null, scope: source, signal, pipelineDeadlineAtMs, checkExpiresAt: check.expiresAt }, { catalog: officialCatalog, reader: readOfficialSource, now: () => new Date(), makeId: randomUUID });
+        await add(official);
+        const checked = official.some(item => item.kind === 'official_document' && item.status === 'observed');
+        const applicable = official.some(item => item.kind === 'official_offer' && item.data.offerStatus !== 'not_applicable');
+        await progress.finishStage('official', checked ? 'completed' : applicable ? 'unavailable' : 'skipped');
+      } catch {
+        signal.throwIfAborted();
+        await add([missing('official_verification_failure', 'Official-source verification could not be completed. No company or offer was cleared.', 'official_source')]);
+        await progress.finishStage('official', 'unavailable');
+      }
+    } else await progress.finishStage('official', 'skipped');
     await progress.patchRun({ state: 'analyzing' });
     await progress.beginStage('comparison');
     let comparisonAvailable = Boolean(intent && observations.some(item => item.kind === 'page' && item.sourceKind === 'live_page' && item.status === 'observed'));
     if (intent) {
-      await add(officialIdentity(intent, check!.input.url, source, env));
+      if (env.SCAMWIN_OFFICIAL_VERIFICATION_ENABLED !== 'true') await add(officialIdentity(intent, check!.input.url, source, env));
       try {
         const concerns = await (dependencies.compare ?? compareOfferWithEvidence)(intent, observations, { env, signal });
         for (const concern of concerns) await add([{ ...source, id: randomUUID(), kind: 'semantic_mismatch', status: 'observed', sourceKind: 'live_page', sourceRef: check!.input.url, observedAt: new Date().toISOString(), data: { description: concern.explanation, quote: concern.quote, basedOnEvidenceId: concern.evidenceId }, collectorVersion: 'scamwin-ai-comparison-1', policyVersion: 'scamwin-fixture-v1' }]);
