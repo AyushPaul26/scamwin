@@ -49,7 +49,8 @@ test('PostgresStore executes the real schema and SQL without a network database'
       const descriptor = { text: strings.reduce((s, part, i) => s + (i ? '$' + i : '') + part, ''), values };
       return {...descriptor, then(resolve, reject) { return execute(descriptor).then(resolve, reject); }};
     };
-    sql.transaction = async queries => db.transaction(async tx => { const out = []; for (const q of queries) out.push(await execute(q, tx)); return out; });
+    let transactionHook;
+    sql.transaction = async queries => db.transaction(async tx => { const out = []; for (const q of queries) { out.push(await execute(q, tx)); if(transactionHook)await transactionHook(q,tx); } return out; });
     const store = new PostgresStore('postgresql://synthetic:synthetic@invalid.invalid/not-used', {trustedAdminSubjects: ['reviewer']});
     store.sql = sql;
     const reset = () => db.exec(`TRUNCATE ${configs.map(c => quote(c.name)).join(',')} CASCADE`);
@@ -61,6 +62,90 @@ test('PostgresStore executes the real schema and SQL without a network database'
       const record = { schemaVersion: 1, ownerId, dailyLimit: 5, utcDay: day, expiresAt: next.toISOString(), ...overrides };
       await db.query('INSERT INTO scamwin_registry_sync(id,deployment,record) VALUES($1,$1,$2::jsonb)', [key, JSON.stringify(record)]);
     }
+    await run('history ties retain deterministic descending IDs across pages and owner/search boundaries', async () => {
+      const template = await store.createCheck('alice', {...input, message: 'History needle'}, 'template');
+      await reset();
+      async function seed(id, overrides = {}, deleted = false) {
+        const record = {...structuredClone(template), id, submissionKey: id, state: 'failed', ...overrides};
+        await db.query('INSERT INTO scamwin_checks(id,owner_id,submission_key,state,generation,revision,record,created_at,updated_at,expires_at,deleted_at) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11)', [id,record.ownerId,id,record.state,record.generation,record.revision,JSON.stringify(record),record.createdAt,record.updatedAt,record.expiresAt,deleted ? record.createdAt : null]);
+      }
+      for (let i = 1; i <= 25; i++) await seed(`history-${String(i).padStart(2, '0')}`);
+      await seed('foreign', {ownerId: 'bob'});
+      await seed('unmatched', {input: {...input, message: 'Different item'}});
+      await seed('expired', {expiresAt: new Date(Date.now() - 1000).toISOString()});
+      await seed('deleted', {}, true);
+      const first = await store.listChecks('alice', {query: 'needle'});
+      const second = await store.listChecks('alice', {query: 'needle', page: 2});
+      assert.equal(first.total, 25);
+      assert.deepEqual(first.checks.map(c => c.id), ['history-25','history-24','history-23','history-22','history-21','history-20','history-19','history-18','history-17','history-16','history-15','history-14','history-13','history-12','history-11','history-10','history-09','history-08','history-07','history-06']);
+      assert.deepEqual(second.checks.map(c => c.id), ['history-05','history-04','history-03','history-02','history-01']);
+      assert.deepEqual(await store.listChecks('alice', {query: 'needle'}), first);
+      assert.equal(new Set([...first.checks, ...second.checks].map(c => c.id)).size, 25);
+      assert.equal((await store.listChecks('bob', {})).total, 1);
+    });
+    await run('submission lookup is owner-bound and read-only, including overdue and deleted checks',async()=>{
+      assert.equal(await store.findCheckBySubmissionKey('alice','missing'),null);
+      const check=await store.createCheck('alice',input,'lookup');
+      assert.equal(await store.findCheckBySubmissionKey('bob','lookup'),null);
+      assert.equal((await store.findCheckBySubmissionKey('alice','lookup')).id,check.id);
+      await db.query("UPDATE scamwin_checks SET created_at=now()-interval '301 seconds' WHERE id=$1",[check.id]);
+      assert.equal((await store.findCheckBySubmissionKey('alice','lookup')).state,'queued');
+      assert.equal((await db.query('SELECT state FROM scamwin_checks WHERE id=$1',[check.id])).rows[0].state,'queued');
+      assert.equal((await store.getCheck('alice',check.id)).state,'failed');
+      await store.deleteCheck('alice',check.id);
+      assert.equal(await store.findCheckBySubmissionKey('alice','lookup'),null);
+      assert.equal((await db.query('SELECT count(*)::int AS count FROM scamwin_checks')).rows[0].count,1);
+    });
+    await run('expired connector admission uses post-mutex wall clock and performs no main writes',async()=>{
+      const deadline=new Date(Date.now()+1000).toISOString();let waited=false;
+      transactionHook=async(q,tx)=>{
+        if(!waited&&q.text.includes("pg_advisory_xact_lock(hashtext('scamwin-admission'))")){
+          waited=true;
+          assert.equal((await tx.query('SELECT now()<$1::timestamptz AS before',[deadline])).rows[0].before,true);
+          await new Promise(resolve=>setTimeout(resolve,1100));
+          assert.equal((await tx.query('SELECT now()<$1::timestamptz AS before,clock_timestamp()>=$1::timestamptz AS after',[deadline])).rows[0].before,true);
+        }
+      };
+      try{await assert.rejects(store.createCheck('alice',input,'expired-fence',deadline),/admission_deadline_expired/);}finally{transactionHook=undefined;}
+      for(const table of ['scamwin_checks','scamwin_runs','scamwin_artifacts','scamwin_job_outbox'])assert.equal((await db.query(`SELECT count(*)::int AS count FROM ${table}`)).rows[0].count,0);
+      assert.deepEqual(await store.lookupCheckAdmission('alice','expired-fence',deadline),{status:'absent_fenced'});
+      for(let i=0;i<3;i++){const check=await store.createCheck('alice',input,`ordinary-${i}`);await store.deleteCheck('alice',check.id);}
+    });
+    await run('serialized admission metadata waits for an inserted uncommitted check and preserves tombstone privacy',async()=>{
+      // One real PGlite transaction scheduler plus executed lock protocol. This is
+      // not independent concurrent PostgreSQL-session acceptance.
+      let insertedResolve,releaseResolve;
+      const inserted=new Promise(resolve=>{insertedResolve=resolve;}),release=new Promise(resolve=>{releaseResolve=resolve;});
+      const deadline=new Date(Date.now()+1000).toISOString();let admissionLockSeen=false,lookupLockSeen=false;
+      transactionHook=async(q)=>{
+        if(q.text.includes("pg_advisory_xact_lock(hashtext('scamwin-admission'))")){if(admissionLockSeen)lookupLockSeen=true;else admissionLockSeen=true;}
+        if(q.text.includes('inserted AS (INSERT INTO scamwin_checks')){assert.ok(admissionLockSeen);insertedResolve();await release;}
+      };
+      try{
+        const creating=store.createCheck('alice',input,'uncommitted',deadline);await inserted;
+        let lookupSettled=false;const looking=store.lookupCheckAdmission('alice','uncommitted',deadline).then(value=>{lookupSettled=true;return value;});
+        await new Promise(resolve=>setTimeout(resolve,1100));assert.equal(lookupSettled,false);
+        releaseResolve();const check=await creating,metadata=await looking;
+        assert.ok(lookupLockSeen);assert.deepEqual(metadata,{status:'existing',checkId:check.id,state:'queued'});
+        assert.equal((await store.createCheck('alice',input,'uncommitted',deadline)).id,check.id);
+        await store.deleteCheck('alice',check.id);
+        assert.deepEqual(await store.lookupCheckAdmission('alice','uncommitted',deadline),{status:'terminal_unavailable',checkId:check.id,reason:'deleted'});
+        assert.deepEqual(await store.lookupCheckAdmission('bob','uncommitted',deadline),{status:'absent_fenced'});
+      }finally{releaseResolve();transactionHook=undefined;}
+    });
+    await run('deadline rejection rolls back earlier overdue maintenance in the same admission transaction',async()=>{
+      const old=await store.createCheck('alice',input,'old-maintenance');
+      await db.query("UPDATE scamwin_checks SET created_at=now()-interval '301 seconds' WHERE id=$1",[old.id]);
+      const beforeRuns=(await db.query('SELECT * FROM scamwin_runs ORDER BY id')).rows;
+      const beforeOutbox=(await db.query('SELECT * FROM scamwin_job_outbox ORDER BY id')).rows;
+      const deadline=new Date(Date.now()+1000).toISOString();let delayed=false;
+      transactionHook=async(q)=>{if(!delayed&&q.text.startsWith('WITH overdue AS')){delayed=true;await new Promise(resolve=>setTimeout(resolve,1100));}};
+      try{await assert.rejects(store.createCheck('bob',input,'late-after-maintenance',deadline),/admission_deadline_expired/);}finally{transactionHook=undefined;}
+      assert.equal((await db.query('SELECT state FROM scamwin_checks WHERE id=$1',[old.id])).rows[0].state,'queued');
+      assert.deepEqual((await db.query('SELECT * FROM scamwin_runs ORDER BY id')).rows,beforeRuns);
+      assert.deepEqual((await db.query('SELECT * FROM scamwin_job_outbox ORDER BY id')).rows,beforeOutbox);
+      assert.equal((await db.query('SELECT count(*)::int AS count FROM scamwin_checks')).rows[0].count,1);
+    });
     await run('test SQL allowance permits only the scoped five admissions, retaining canceled/deleted starts and global caps',async()=>{
       await seedTestAllowance('alice');
       for(let i=0;i<5;i++){const c=await store.createCheck('alice',input,String(i));await store.deleteCheck('alice',c.id);}

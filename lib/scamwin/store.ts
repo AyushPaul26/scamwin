@@ -4,7 +4,7 @@ import { neon } from "@neondatabase/serverless";
 import type { NeonQueryFunction } from "@neondatabase/serverless";
 import { z } from "zod";
 import { assessmentSchema, checkStates, observationSchema, offerIntentSchema } from "./contracts";
-import type { Artifact, ArtifactInput, CheckInput, CheckMessage, CheckPage, CheckRecord, IndicatorFingerprint, IndicatorKind, MessageInput, Observation, OperationalState, OutboxJob, PublicationPatch, PublicationRecord, PublicWarning, PurgeResult, ReviewInput, RunPatch, ScamwinRole, ScamwinStore, WarningDraftInput, WarningSubmission } from "./contracts";
+import type { AdmissionLookup, Artifact, ArtifactInput, CheckInput, CheckMessage, CheckPage, CheckRecord, IndicatorFingerprint, IndicatorKind, MessageInput, Observation, OperationalState, OutboxJob, PublicationPatch, PublicationRecord, PublicWarning, PurgeResult, ReviewInput, RunPatch, ScamwinRole, ScamwinStore, WarningDraftInput, WarningSubmission } from "./contracts";
 import { checkInputSchema, isPublicInputUrl, validatePreparedImage } from "./input";
 import type { LiveViewScope, LiveViewRecord, LiveViewPatch } from "./live-view-contracts";
 import { createInitialStages, finishInterruptedStages } from "./progress";
@@ -156,10 +156,12 @@ export class MemoryStore implements ScamwinStore {
     this.owned(ownerId, checkId);
     return ids.map((id) => { const o = this.observations.get(id); return o?.checkId === checkId ? o : fail("invalid_evidence"); });
   }
-  async createCheck(ownerId: string, input: CheckInput, submissionKey: string): Promise<CheckRecord> {
+  async createCheck(ownerId: string, input: CheckInput, submissionKey: string, admissionDeadlineAt?: string): Promise<CheckRecord> {
+    if (admissionDeadlineAt !== undefined) z.string().datetime().parse(admissionDeadlineAt);
     const now = this.now(), c = newCheck(ownerId, input, submissionKey, now);
     const existing = [...this.checks.values()].find((v) => v.ownerId === ownerId && v.submissionKey === submissionKey);
     if (existing) { if (existing.submissionHash !== c.submissionHash) fail("submission_conflict"); return this.view(this.read(existing.id, ownerId) ?? fail("submission_expired"))!; }
+    if (admissionDeadlineAt && now.getTime() >= Date.parse(admissionDeadlineAt)) fail("admission_deadline_expired");
     if (this.operations.investigationPaused) fail("investigation_paused");
     const day = now.toISOString().slice(0, 10), month = day.slice(0, 7);
     if (this.admissions.filter((a) => a.createdAt.startsWith(day)).length >= 10) fail("global_daily_quota");
@@ -175,10 +177,27 @@ export class MemoryStore implements ScamwinStore {
     this.enqueue("investigate", c.id, 1, `scamwin:${c.id}:1`); return this.view(c)!;
   }
   async getCheck(ownerId: string, id: string) { identity(ownerId); return this.view(this.read(id, ownerId)); }
+  async findCheckBySubmissionKey(ownerId: string, submissionKey: string) {
+    identity(ownerId); if (!submissionKey || submissionKey.length > 200) fail('invalid_submission_key');
+    const check = [...this.checks.values()].find(c => c.ownerId === ownerId && c.submissionKey === submissionKey && !this.deleted.has(c.id) && c.expiresAt > this.now().toISOString());
+    return this.view(check ?? null);
+  }
+  async lookupCheckAdmission(ownerId: string, submissionKey: string, admissionDeadlineAt: string): Promise<AdmissionLookup> {
+    identity(ownerId); if (!submissionKey || submissionKey.length > 200) fail('invalid_submission_key');
+    z.string().datetime().parse(admissionDeadlineAt);
+    // Memory admission has no await before commit, so this synchronous read shares
+    // its event-loop serialization boundary and cannot observe an in-flight insert.
+    const c = [...this.checks.values()].find(v => v.ownerId === ownerId && v.submissionKey === submissionKey);
+    if (c) {
+      if (this.deleted.has(c.id) || c.expiresAt <= this.now().toISOString()) return { status: 'terminal_unavailable', checkId: c.id, reason: this.deleted.has(c.id) ? 'deleted' : 'expired' };
+      return { status: 'existing', checkId: c.id, state: c.state };
+    }
+    return { status: this.now().getTime() >= Date.parse(admissionDeadlineAt) ? 'absent_fenced' : 'pending' };
+  }
   async getInternalCheck(id: string) { return this.view(this.read(id)); }
   async listChecks(ownerId: string, options: { page?: number; query?: string }): Promise<CheckPage> {
     identity(ownerId); const page = Math.max(1, Math.floor(options.page ?? 1)), pageSize = 20, query = (options.query ?? "").slice(0, 200).toLowerCase();
-    const checks = [...this.checks.values()].filter((c) => this.read(c.id, ownerId) && JSON.stringify([c.input.url, c.input.message, c.input.promisedBenefit, c.input.intendedAction, c.input.claimedCompany ?? '', c.input.offerReference ?? '']).toLowerCase().includes(query)).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    const checks = [...this.checks.values()].filter((c) => this.read(c.id, ownerId) && JSON.stringify([c.input.url, c.input.message, c.input.promisedBenefit, c.input.intendedAction, c.input.claimedCompany ?? '', c.input.offerReference ?? '']).toLowerCase().includes(query)).sort((a, b) => b.createdAt.localeCompare(a.createdAt) || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0));
     return { checks: checks.slice((page - 1) * pageSize, page * pageSize).map((c) => this.view(c)!), total: checks.length, page, pageSize };
   }
   async claimRun(id: string, generation: number) {
@@ -274,9 +293,9 @@ export class MemoryStore implements ScamwinStore {
   private enqueue(kind: OutboxJob["kind"], aggregateId: string, generation: number, idempotencyKey: string) {
     const id = nanoid(); this.outbox.set(id, { id, kind, aggregateId, generation, idempotencyKey, state: "pending", attempts: 0 });
   }
-  async leaseOutbox(limit = 10, kinds: OutboxJob["kind"][] = ["investigate", "publish_warning", "retract_warning"]) {
+  async leaseOutbox(limit = 10, kinds: OutboxJob["kind"][] = ["investigate", "publish_warning", "retract_warning"], aggregateId?: string) {
     const allowedKinds = outboxKindsSchema.parse(kinds);
-    const now = this.now(), jobs = [...this.outbox.values()].filter((j) => allowedKinds.includes(j.kind) && j.attempts < 3 && (j.state === "pending" || j.state === "failed" || (j.state === "leased" && (j.leaseUntil ?? "") <= now.toISOString()))).filter((j) => j.kind === "investigate" ? this.read(j.aggregateId)?.generation === j.generation && ["queued", "validating", "collecting", "analyzing"].includes(this.read(j.aggregateId)!.state) : this.publicWarnings.get(j.aggregateId)?.revision === j.generation && (j.kind === "retract_warning" || this.warnings.get(j.aggregateId)?.status === "approved")).slice(0, Math.min(20, Math.max(1, limit)));
+    const now = this.now(), jobs = [...this.outbox.values()].filter((j) => (aggregateId === undefined || j.aggregateId === aggregateId) && allowedKinds.includes(j.kind) && j.attempts < 3 && (j.state === "pending" || j.state === "failed" || (j.state === "leased" && (j.leaseUntil ?? "") <= now.toISOString()))).filter((j) => j.kind === "investigate" ? this.read(j.aggregateId)?.generation === j.generation && ["queued", "validating", "collecting", "analyzing"].includes(this.read(j.aggregateId)!.state) : this.publicWarnings.get(j.aggregateId)?.revision === j.generation && (j.kind === "retract_warning" || this.warnings.get(j.aggregateId)?.status === "approved")).slice(0, Math.min(20, Math.max(1, limit)));
     for (const j of jobs) { j.state = "leased"; j.attempts++; j.leaseUntil = new Date(now.getTime() + 60000).toISOString(); }
     return clone(jobs);
   }
@@ -448,18 +467,20 @@ export class PostgresStore implements ScamwinStore {
     await this.owned(ownerId, checkId); const all = await this.listObservations(ownerId, checkId);
     return ids.map((id) => all.find((o) => o.id === id) ?? fail("invalid_evidence"));
   }
-  async createCheck(ownerId: string, input: CheckInput, submissionKey: string) {
+  async createCheck(ownerId: string, input: CheckInput, submissionKey: string, admissionDeadlineAt?: string) {
+    if (admissionDeadlineAt !== undefined) z.string().datetime().parse(admissionDeadlineAt);
     const now = new Date(), c = newCheck(ownerId, input, submissionKey, now), images = separateImages(c, now), sql = this.sql;
     const allowanceKey = dailyCheckAllowanceKey(ownerId);
     const result = await sql.transaction([
       sql`SELECT pg_advisory_xact_lock(hashtext('scamwin-admission'))`,
       sql`SELECT pg_advisory_xact_lock(hashtext('scamwin-artifacts'))`,
-      sql`SELECT id FROM scamwin_checks WHERE deleted_at IS NULL AND (created_at<=now()-interval '300 seconds' OR expires_at<=now()) AND state IN('queued','validating','collecting','analyzing','cancel_requested') ORDER BY id FOR UPDATE`,
-      sql`WITH overdue AS (UPDATE scamwin_checks SET state=CASE WHEN state='cancel_requested' THEN 'canceled' ELSE 'failed' END,generation=generation+1,revision=revision+1,updated_at=now(),record=record||jsonb_build_object('state',CASE WHEN state='cancel_requested' THEN 'canceled' ELSE 'failed' END,'generation',generation+1,'revision',revision+1,'errorCode','deadline_exceeded','updatedAt',to_char(now() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),'stages',(SELECT COALESCE(jsonb_agg(CASE WHEN stage->>'status'='running' THEN stage||jsonb_build_object('status',CASE WHEN state='cancel_requested' THEN 'canceled' ELSE 'unavailable' END,'finishedAt',COALESCE(stage->>'finishedAt',to_char(now() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))) WHEN stage->>'status'='pending' THEN stage||jsonb_build_object('status','skipped') ELSE stage END ORDER BY ordinal),'[]'::jsonb) FROM jsonb_array_elements(record->'stages') WITH ORDINALITY AS terminal_stages(stage,ordinal))) WHERE deleted_at IS NULL AND created_at<=now()-interval '300 seconds' AND state IN('queued','validating','collecting','analyzing','cancel_requested') RETURNING id), live_views AS (UPDATE scamwin_live_views SET status='ended',encrypted_locator=NULL,ended_at=now(),reason_code='deadline_exceeded' WHERE check_id IN(SELECT id FROM overdue) AND status IN('ready','connected')), runs AS (UPDATE scamwin_runs SET state='failed',cleanup_state='pending' WHERE check_id IN(SELECT id FROM overdue)), outbox AS (UPDATE scamwin_job_outbox SET state='revoked' WHERE kind='investigate' AND aggregate_id IN(SELECT id FROM overdue) AND state<>'dispatched') SELECT id FROM overdue`,
-      sql`WITH expired AS (UPDATE scamwin_checks SET state='canceled',generation=generation+1,revision=revision+1,record=record||jsonb_build_object('state','canceled','generation',generation+1,'revision',revision+1,'stages',(SELECT COALESCE(jsonb_agg(CASE WHEN stage->>'status'='running' THEN stage||jsonb_build_object('status','canceled','finishedAt',COALESCE(stage->>'finishedAt',to_char(now() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))) WHEN stage->>'status'='pending' THEN stage||jsonb_build_object('status','skipped') ELSE stage END ORDER BY ordinal),'[]'::jsonb) FROM jsonb_array_elements(record->'stages') WITH ORDINALITY AS terminal_stages(stage,ordinal))) WHERE expires_at<=now() AND state IN('queued','validating','collecting','analyzing','cancel_requested') RETURNING id)
+      sql`SELECT id FROM scamwin_checks WHERE (${admissionDeadlineAt ?? null}::timestamptz IS NULL OR clock_timestamp()<${admissionDeadlineAt ?? null}::timestamptz) AND deleted_at IS NULL AND (created_at<=now()-interval '300 seconds' OR expires_at<=now()) AND state IN('queued','validating','collecting','analyzing','cancel_requested') ORDER BY id FOR UPDATE`,
+      sql`WITH overdue AS (UPDATE scamwin_checks SET state=CASE WHEN state='cancel_requested' THEN 'canceled' ELSE 'failed' END,generation=generation+1,revision=revision+1,updated_at=now(),record=record||jsonb_build_object('state',CASE WHEN state='cancel_requested' THEN 'canceled' ELSE 'failed' END,'generation',generation+1,'revision',revision+1,'errorCode','deadline_exceeded','updatedAt',to_char(now() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),'stages',(SELECT COALESCE(jsonb_agg(CASE WHEN stage->>'status'='running' THEN stage||jsonb_build_object('status',CASE WHEN state='cancel_requested' THEN 'canceled' ELSE 'unavailable' END,'finishedAt',COALESCE(stage->>'finishedAt',to_char(now() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))) WHEN stage->>'status'='pending' THEN stage||jsonb_build_object('status','skipped') ELSE stage END ORDER BY ordinal),'[]'::jsonb) FROM jsonb_array_elements(record->'stages') WITH ORDINALITY AS terminal_stages(stage,ordinal))) WHERE (${admissionDeadlineAt ?? null}::timestamptz IS NULL OR clock_timestamp()<${admissionDeadlineAt ?? null}::timestamptz) AND deleted_at IS NULL AND created_at<=now()-interval '300 seconds' AND state IN('queued','validating','collecting','analyzing','cancel_requested') RETURNING id), live_views AS (UPDATE scamwin_live_views SET status='ended',encrypted_locator=NULL,ended_at=now(),reason_code='deadline_exceeded' WHERE check_id IN(SELECT id FROM overdue) AND status IN('ready','connected')), runs AS (UPDATE scamwin_runs SET state='failed',cleanup_state='pending' WHERE check_id IN(SELECT id FROM overdue)), outbox AS (UPDATE scamwin_job_outbox SET state='revoked' WHERE kind='investigate' AND aggregate_id IN(SELECT id FROM overdue) AND state<>'dispatched') SELECT id FROM overdue`,
+      sql`WITH expired AS (UPDATE scamwin_checks SET state='canceled',generation=generation+1,revision=revision+1,record=record||jsonb_build_object('state','canceled','generation',generation+1,'revision',revision+1,'stages',(SELECT COALESCE(jsonb_agg(CASE WHEN stage->>'status'='running' THEN stage||jsonb_build_object('status','canceled','finishedAt',COALESCE(stage->>'finishedAt',to_char(now() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))) WHEN stage->>'status'='pending' THEN stage||jsonb_build_object('status','skipped') ELSE stage END ORDER BY ordinal),'[]'::jsonb) FROM jsonb_array_elements(record->'stages') WITH ORDINALITY AS terminal_stages(stage,ordinal))) WHERE (${admissionDeadlineAt ?? null}::timestamptz IS NULL OR clock_timestamp()<${admissionDeadlineAt ?? null}::timestamptz) AND expires_at<=now() AND state IN('queued','validating','collecting','analyzing','cancel_requested') RETURNING id)
         UPDATE scamwin_live_views SET status='ended',encrypted_locator=NULL,ended_at=now(),reason_code='expired' WHERE check_id IN(SELECT id FROM expired) AND status IN('ready','connected')`,
       sql`WITH existing AS (SELECT record, deleted_at, expires_at FROM scamwin_checks WHERE owner_id=${ownerId} AND submission_key=${submissionKey}),
         limits AS (SELECT CASE
+          WHEN ${admissionDeadlineAt ?? null}::timestamptz IS NOT NULL AND clock_timestamp()>=${admissionDeadlineAt ?? null}::timestamptz THEN 'admission_deadline_expired'
           WHEN EXISTS (SELECT 1 FROM scamwin_registry_sync WHERE id='scamwin-operations' AND record->>'investigationPaused'='true') THEN 'investigation_paused'
           WHEN (SELECT count(*) FROM scamwin_runs WHERE created_at >= date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC') >= 10 THEN 'global_daily_quota'
           WHEN (SELECT count(*) FROM scamwin_runs WHERE created_at >= date_trunc('month', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC') >= 50 THEN 'global_monthly_quota'
@@ -472,7 +493,7 @@ export class PostgresStore implements ScamwinStore {
           WHEN (SELECT COALESCE(sum(bytes),0) FROM scamwin_artifacts WHERE expires_at>now())+${images.reduce((sum, a) => sum + a.byteLength, 0)} > ${ARTIFACT_CAP} THEN 'artifact_storage_cap' ELSE NULL END AS error),
         inserted AS (INSERT INTO scamwin_checks(id,owner_id,submission_key,state,generation,revision,record,expires_at)
           SELECT ${c.id},${ownerId},${submissionKey},'queued',1,0,${JSON.stringify(c)}::jsonb,${c.expiresAt}::timestamptz
-          WHERE NOT EXISTS(SELECT 1 FROM existing) AND (SELECT error FROM limits) IS NULL RETURNING record),
+          WHERE NOT EXISTS(SELECT 1 FROM existing) AND (SELECT error FROM limits) IS NULL AND (${admissionDeadlineAt ?? null}::timestamptz IS NULL OR clock_timestamp()<${admissionDeadlineAt ?? null}::timestamptz) RETURNING record),
         run AS (INSERT INTO scamwin_runs(id,check_id,generation,state,deadline,owner_id)
           SELECT ${c.runId},${c.id},1,'queued',now()+interval '300 seconds',${ownerId} FROM inserted RETURNING id),
         images AS (INSERT INTO scamwin_artifacts(id,check_id,owner_id,run_id,kind,bytes,sha256,record,expires_at)
@@ -480,19 +501,45 @@ export class PostgresStore implements ScamwinStore {
           FROM jsonb_array_elements(${JSON.stringify(images)}::jsonb) a WHERE EXISTS(SELECT 1 FROM inserted)),
         outbox AS (INSERT INTO scamwin_job_outbox(id,kind,aggregate_id,generation,idempotency_key)
           SELECT ${nanoid()},'investigate',${c.id},1,${`scamwin:${c.id}:1`} FROM run RETURNING id)
-        SELECT record,NULL::text AS error FROM existing WHERE deleted_at IS NULL AND expires_at>now() AND record->>'submissionHash'=${c.submissionHash!}
-        UNION ALL SELECT record,NULL FROM inserted
-        UNION ALL SELECT NULL::jsonb,CASE WHEN EXISTS(SELECT 1 FROM existing WHERE record->>'submissionHash'<>${c.submissionHash!}) THEN 'submission_conflict' WHEN EXISTS(SELECT 1 FROM existing) THEN 'submission_expired' ELSE (SELECT error FROM limits) END
+        SELECT record,NULL::text AS error,1 AS deadline_guard FROM existing WHERE deleted_at IS NULL AND expires_at>now() AND record->>'submissionHash'=${c.submissionHash!}
+        UNION ALL SELECT record,NULL,1 FROM inserted
+        UNION ALL SELECT NULL::jsonb,CASE WHEN EXISTS(SELECT 1 FROM existing WHERE record->>'submissionHash'<>${c.submissionHash!}) THEN 'submission_conflict' WHEN EXISTS(SELECT 1 FROM existing) THEN 'submission_expired' WHEN ${admissionDeadlineAt ?? null}::timestamptz IS NOT NULL AND clock_timestamp()>=${admissionDeadlineAt ?? null}::timestamptz THEN 'admission_deadline_expired' ELSE (SELECT error FROM limits) END,
+          1 / CASE WHEN NOT EXISTS(SELECT 1 FROM existing) AND ${admissionDeadlineAt ?? null}::timestamptz IS NOT NULL AND clock_timestamp()>=${admissionDeadlineAt ?? null}::timestamptz THEN 0 ELSE 1 END
           WHERE NOT EXISTS(SELECT 1 FROM inserted) AND NOT EXISTS(SELECT 1 FROM existing WHERE deleted_at IS NULL AND expires_at>now() AND record->>'submissionHash'=${c.submissionHash!})`,
-    ], { isolationLevel: "ReadCommitted" });
+    ], { isolationLevel: "ReadCommitted" }).catch((error: unknown) => {
+      // The deadline guard deliberately raises SQLSTATE 22012 on a rejected
+      // new insertion, rolling back any earlier overdue-maintenance writes too.
+      if (admissionDeadlineAt && typeof error === 'object' && error !== null && 'code' in error && error.code === '22012') fail('admission_deadline_expired');
+      throw error;
+    });
     const row = result[result.length - 1][0]; if (!row?.record) fail(String(row?.error ?? "admission_failed")); return (await this.view(row.record as CheckRecord))!;
   }
   async getCheck(ownerId: string, id: string) { identity(ownerId); await this.expireOverdue(ownerId, id); const rows = await this.sql`SELECT record FROM scamwin_checks WHERE id=${id} AND owner_id=${ownerId} AND deleted_at IS NULL AND expires_at>now()`; return this.view((rows[0]?.record as CheckRecord) ?? null); }
+  async findCheckBySubmissionKey(ownerId: string, submissionKey: string) {
+    identity(ownerId); if (!submissionKey || submissionKey.length > 200) fail('invalid_submission_key');
+    const rows = await this.sql`SELECT record FROM scamwin_checks WHERE owner_id=${ownerId} AND submission_key=${submissionKey} AND deleted_at IS NULL AND expires_at>now()`;
+    return this.view((rows[0]?.record as CheckRecord) ?? null);
+  }
+  async lookupCheckAdmission(ownerId: string, submissionKey: string, admissionDeadlineAt: string): Promise<AdmissionLookup> {
+    identity(ownerId); if (!submissionKey || submissionKey.length > 200) fail('invalid_submission_key');
+    z.string().datetime().parse(admissionDeadlineAt);
+    const sql = this.sql;
+    const results = await sql.transaction([
+      sql`SELECT pg_advisory_xact_lock(hashtext('scamwin-admission'))`,
+      sql`WITH existing AS (SELECT id,state,deleted_at,expires_at FROM scamwin_checks WHERE owner_id=${ownerId} AND submission_key=${submissionKey})
+        SELECT CASE WHEN deleted_at IS NOT NULL OR expires_at<=clock_timestamp() THEN 'terminal_unavailable' ELSE 'existing' END AS status,id AS check_id,state,CASE WHEN deleted_at IS NOT NULL THEN 'deleted' ELSE 'expired' END AS reason FROM existing
+        UNION ALL SELECT CASE WHEN clock_timestamp()>=${admissionDeadlineAt}::timestamptz THEN 'absent_fenced' ELSE 'pending' END,NULL,NULL,NULL WHERE NOT EXISTS(SELECT 1 FROM existing)`,
+    ], { isolationLevel: "ReadCommitted" });
+    const row = results[1][0];
+    if (row.status === 'existing') return { status: 'existing', checkId: String(row.check_id), state: row.state as CheckRecord['state'] };
+    if (row.status === 'terminal_unavailable') return { status: 'terminal_unavailable', checkId: String(row.check_id), reason: row.reason as 'deleted' | 'expired' };
+    return { status: row.status as 'pending' | 'absent_fenced' };
+  }
   async getInternalCheck(id: string) { await this.expireOverdue(undefined, id); const rows = await this.sql`SELECT record FROM scamwin_checks WHERE id=${id} AND deleted_at IS NULL AND expires_at>now()`; return this.view((rows[0]?.record as CheckRecord) ?? null); }
   async listChecks(ownerId: string, options: { page?: number; query?: string }): Promise<CheckPage> {
     identity(ownerId); await this.expireOverdue(ownerId); const page = Math.max(1, Math.floor(options.page ?? 1)), query = (options.query ?? "").slice(0, 200).toLowerCase();
-    const result = await this.sql`WITH matches AS (SELECT record,created_at FROM scamwin_checks WHERE owner_id=${ownerId} AND deleted_at IS NULL AND expires_at>now() AND position(${query} in lower(concat_ws(' ',record->'input'->>'url',record->'input'->>'message',record->'input'->>'promisedBenefit',record->'input'->>'intendedAction',record->'input'->>'claimedCompany',record->'input'->>'offerReference')))>0)
-      SELECT (SELECT count(*) FROM matches)::int AS total, COALESCE((SELECT jsonb_agg(record) FROM (SELECT record FROM matches ORDER BY created_at DESC LIMIT 20 OFFSET ${(page - 1) * 20}) p),'[]'::jsonb) AS checks`;
+    const result = await this.sql`WITH matches AS (SELECT id,record,created_at FROM scamwin_checks WHERE owner_id=${ownerId} AND deleted_at IS NULL AND expires_at>now() AND position(${query} in lower(concat_ws(' ',record->'input'->>'url',record->'input'->>'message',record->'input'->>'promisedBenefit',record->'input'->>'intendedAction',record->'input'->>'claimedCompany',record->'input'->>'offerReference')))>0)
+      SELECT (SELECT count(*) FROM matches)::int AS total, COALESCE((SELECT jsonb_agg(record ORDER BY created_at DESC,id COLLATE "C" DESC) FROM (SELECT id,record,created_at FROM matches ORDER BY created_at DESC,id COLLATE "C" DESC LIMIT 20 OFFSET ${(page - 1) * 20}) p),'[]'::jsonb) AS checks`;
     return { checks: await Promise.all((result[0].checks as CheckRecord[]).map(async (c) => (await this.view(c))!)), total: Number(result[0].total), page, pageSize: 20 };
   }
   async claimRun(id: string, generation: number) {
@@ -609,10 +656,10 @@ export class PostgresStore implements ScamwinStore {
     const rows = await this.sql`INSERT INTO scamwin_roles(id,owner_id,role) SELECT ${nanoid()},${ownerId},${role} WHERE ${this.trustedAdmins.has(actorId)} OR EXISTS(SELECT 1 FROM scamwin_roles WHERE owner_id=${actorId} AND role='admin') ON CONFLICT(owner_id,role) DO UPDATE SET role=EXCLUDED.role RETURNING id`;
     if (!rows.length) fail("forbidden");
   }
-  async leaseOutbox(limit = 10, kinds: OutboxJob["kind"][] = ["investigate", "publish_warning", "retract_warning"]): Promise<OutboxJob[]> {
+  async leaseOutbox(limit = 10, kinds: OutboxJob["kind"][] = ["investigate", "publish_warning", "retract_warning"], aggregateId?: string): Promise<OutboxJob[]> {
     const allowedKinds = outboxKindsSchema.parse(kinds), sql = this.sql, results = await sql.transaction([
       sql`SELECT pg_advisory_xact_lock(hashtext('scamwin-review'))`,
-      sql`WITH selected AS (SELECT o.id FROM scamwin_job_outbox o WHERE o.kind=ANY(${allowedKinds}::text[]) AND o.attempts<3 AND (o.state IN('pending','failed') OR (o.state='leased' AND o.lease_until<=now()))
+      sql`WITH selected AS (SELECT o.id FROM scamwin_job_outbox o WHERE (${aggregateId ?? null}::text IS NULL OR o.aggregate_id=${aggregateId ?? null}) AND o.kind=ANY(${allowedKinds}::text[]) AND o.attempts<3 AND (o.state IN('pending','failed') OR (o.state='leased' AND o.lease_until<=now()))
         AND ((o.kind='investigate' AND EXISTS(SELECT 1 FROM scamwin_checks c WHERE c.id=o.aggregate_id AND c.generation=o.generation AND c.deleted_at IS NULL AND c.expires_at>now() AND c.state IN('queued','validating','collecting','analyzing')))
         OR (o.kind IN('publish_warning','retract_warning') AND EXISTS(SELECT 1 FROM scamwin_public_warnings w WHERE w.id=o.aggregate_id AND w.revision=o.generation AND (o.kind='retract_warning' OR EXISTS(SELECT 1 FROM scamwin_warning_submissions s WHERE s.id=w.id AND s.status='approved'))))) ORDER BY o.created_at LIMIT ${Math.min(20, Math.max(1, Math.floor(limit)))} FOR UPDATE OF o SKIP LOCKED)
       UPDATE scamwin_job_outbox SET state='leased',attempts=attempts+1,lease_until=now()+interval '60 seconds' WHERE id IN(SELECT id FROM selected) RETURNING *`,

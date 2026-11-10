@@ -1,0 +1,3 @@
+/* Account notifications only. No fetch handler and no page/API/OAuth caching. */
+self.addEventListener('push',event=>{event.waitUntil(self.registration.showNotification('Scamwin',{body:'You have a private account update. Sign in to read it.',tag:'scamwin-private-account',data:{url:'/account/alerts'}}));});
+self.addEventListener('notificationclick',event=>{event.notification.close();event.waitUntil((async()=>{const url=new URL('/account/alerts',self.location.origin).href;const windows=await self.clients.matchAll({type:'window',includeUncontrolled:true});const existing=windows.find(client=>client.url===url);if(existing){await existing.focus();return;}await self.clients.openWindow(url);})());});

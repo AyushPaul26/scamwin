@@ -1,0 +1,6 @@
+{
+  "name": "Check with Scamwin",
+  "type": 3,
+  "integration_types": [1],
+  "contexts": [0, 1, 2]
+}

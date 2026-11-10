@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { AlternativeProjection } from './alternatives';
 
 // This module is browser safe: authority and transport live in separate modules.
 export const companyStatusSchema = z.enum(["recognized", "ambiguous", "unlisted", "expired", "not_claimed"]);
@@ -89,7 +90,7 @@ export type OfficialReadBudget = { deadlineAtMs: number; documentsRemaining: num
 export type OfficialDocument = { sourceId: string; readUrl: string; finalReadUrl: string; fetchedAt: string; status: "ok" | "not_found" | "unavailable" | "blocked"; contentType: string | null; body: string | null; digest: string | null; reasonCode: string | null };
 export type OfficialOfferFact = { status: OfferStatus; sourceId: string | null; reference: string | null; title: string | null; location: string | null; validThrough: string | null; quote: string | null; canonicalUrl: string | null; differingFields: string[]; reasonCode: string };
 export type OfficialStep = { stepId: string; sourceId: string; purpose: z.infer<typeof officialStepPurposeSchema>; label: string; hostname: string; canonicalUrl: string; publicReference: PublicOfferReference | null; evidenceIds: string[]; catalogVersion: string; expiresAt: string; basis: z.infer<typeof officialStepBasisSchema> };
-export type OfficialVerificationView = { company: { status: CompanyStatus; name: string | null; evidenceIds: string[] }; destination: { status: DestinationStatus; hostname: string | null; evidenceIds: string[] }; offer: Omit<OfficialOfferFact, "canonicalUrl"> & { evidenceIds: string[] }; freshness: FreshnessStatus; checkedAt: string | null; explanation: string; sourceEvidenceIds: string[]; steps: Omit<OfficialStep, "canonicalUrl">[] };
+export type OfficialVerificationView = { company: { status: CompanyStatus; name: string | null; evidenceIds: string[] }; destination: { status: DestinationStatus; hostname: string | null; evidenceIds: string[] }; offer: Omit<OfficialOfferFact, "canonicalUrl"> & { evidenceIds: string[] }; freshness: FreshnessStatus; checkedAt: string | null; explanation: string; sourceEvidenceIds: string[]; steps: Omit<OfficialStep, "canonicalUrl">[]; alternatives?: AlternativeProjection[] };
 export type OfficialReader = (source: OfficialSource, reference: PublicOfferReference | null, options: { signal: AbortSignal; budget: OfficialReadBudget }) => Promise<OfficialDocument>;
 
 // Saved data has a deliberately flat shape; the observation envelope owns run and owner scope.

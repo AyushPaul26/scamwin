@@ -34,6 +34,6 @@ test('maintenance rejects absent or wrong authorization, purges expired records 
     assert.equal((await response.json()).checks, 1);
     assert.equal(await store.getCheck('owner', check.id), null);
   `;
-  const result = spawnSync(process.execPath, ['--conditions=react-server', '--import', 'tsx', '--input-type=module', '-e', script], { encoding: 'utf8', env: { ...process.env, NODE_ENV: 'test' } });
+  const result = spawnSync(process.execPath, ['--conditions=react-server', '--import', 'tsx', '--input-type=module', '-e', script], { encoding: 'utf8', env: { SystemRoot: process.env.SystemRoot, WINDIR: process.env.WINDIR, PATH: process.env.PATH, TEMP: process.env.TEMP, TMP: process.env.TMP, NODE_ENV: 'test' } });
   assert.equal(result.status, 0, result.stderr || result.stdout);
 });

@@ -26,6 +26,9 @@ Visual intent and runtime-token mapping are maintained in [DESIGN.md](DESIGN.md)
 | Select/Listbox | Native intended-action select in intake; platform-owned popup geometry is accepted | Explicit action token contract | Native select, filter buttons and native checkbox groups | Keyboard |
 | Date | Not applicable: read-only Intl formatting | Server UTC timestamps, viewer locale | en-IN date and local timezone name | Valid date output |
 | Table Selection | Not applicable: no bulk list selection | Explicit individual evidence consent | Native evidence checkboxes | Label, checked state |
+| Account navigation | `account-nav.tsx`, shared Shell Base UI account menu and bell | Auth0 identity; canonical route map in `connectors/ui.ts` | Overview, Connected apps, Private alerts, Activity, public Privacy | Keyboard menu, narrow wrapping, canonical `/checks` preserved |
+| Connected apps | `connections.tsx`, `private-list.tsx`, `connection-actions.ts`, connector Account service | Auth0 subject, saved epoch, server-only grant inspection | Manual, Selective automatic, All new items; pause/disconnect | Missing/partial/expired permission; explicit consent; owner/epoch rejection; feature-off reads/disconnect |
+| Private event lists | `private-alerts.tsx`, `activity.tsx`, bounded POST read routes | Owner-scoped connector SQL; expiring metadata | Private alert read state; sync/gap/connection/job activity | 21-record paging, full-dataset filtering, stale/aborted reads, no private URL/storage state |
 
 ## Flow ledger
 
@@ -38,6 +41,11 @@ Visual intent and runtime-token mapping are maintained in [DESIGN.md](DESIGN.md)
 | Follow-up | Stay on check; append server-confirmed message | Preserve question, retry same operation key | Product §7 |
 | Submit warning | Explicit selected-evidence consent + exact redacted payload; sent-for-review state | Preserve fields and consent; retry | Product §11 |
 | Review / retract | Require reason; refresh queue or warning after success | Preserve reason; explain stale revision/reload | Product §11 |
+| Connect app | Structured begin action; provider authorization unavailable until its real factory is supplied | No simulated success or grant from a browser identity | Connected-app plan Task 2/4 |
+| Save connection mode | Explicit scope and AI consent before automatic save; stay on Connections and reload | Preserve selections; explain stale epoch, authorization or service failure | Connected-app plan; connector settings contract |
+| Choose mailbox resources | Load metadata and select owner/epoch-bound server handles; no raw provider IDs in the mode form | Invalid selection focuses the first resource choice and associates its inline error; failed saves preserve choices | Mailbox resource service and shared connection settings schema |
+| Pause / disconnect | Owner and epoch checked; pause preserves coverage/backlog; disconnect erases grant/cursor, cancels waiting work and routes admitted cancellation IDs to the main store | Keep dialog and sanitized failure; saved reads remain available during feature-off | Connector lifecycle contract |
+| Mark private alert read | Server-confirmed read state followed by list reload; empty last page clamps backward | Preserve unread state on rejection; retry | Connector alert ownership/expiry |
 
 ## State and dataset contracts
 
@@ -46,6 +54,10 @@ Private check reads poll every 2 seconds while active and 10 seconds when hidden
 Private history is newest first with server pagination of 20 records. Search is transient sensitive state kept in component memory and authenticated action bodies. Filters reset page; deletion clamps out-of-range pages. Public warning search is local over the bounded server projection and paginates 20 records. Warning state filters are explicit buttons.
 
 All lists distinguish loading, empty, no-results and read errors. Access gates distinguish missing configuration, signed out, forbidden role and failed bootstrap; they do not manufacture a signed-in user or substitute fixtures for production records. `/demo` alone presents synthetic, read-only fixtures and never invokes mutations.
+
+Account Privacy remains readable without sign-in. Connected-app lists authenticate independently of main investigation availability; feature-off prevents new work while preserving owner reads and disconnect. POST list bodies carry transient queries/filters and opaque 20-record cursors; SQL filters the full owned dataset before pagination. Superseded reads abort and cannot replace newer selections; failed updates retain prior records with an out-of-date notice. Connection cards include epoch and revision; alert/activity projections include epoch and alert revision identity. No card or list includes grant, provider cursor, body or provider account identifier. An active saved connection alone does not establish permission readiness: only server grant inspection can derive accepted, missing, partial or expired permission. Available provider setup cards remain unavailable until a real authorization factory exists. Private alerts and Activity link to the existing `/checks` dataset; no parallel history is created.
+
+Connections, alerts and Activity order by creation time descending with ID as a stable tie-breaker; opaque cursors carry both values so equal-time records cross page boundaries without omission or duplication. Re-selecting the active first-page filter/query is a no-op. Disconnect commits local epoch invalidation and grant erasure first, retaining admitted cancellation intent on canceled connector jobs until each successful main-store request is acknowledged. Partial failures leave only failed IDs pending for owner-idempotent retry under the original or refreshed disconnected epoch. A disconnected card exposes pending status and Retry cancellation even while the feature is off; no browser check-ID list is trusted. Pending metadata retains the existing bounded expiry.
 
 ## Input, async and recovery
 

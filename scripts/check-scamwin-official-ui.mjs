@@ -7,7 +7,8 @@ import { chromium } from 'playwright';
 // the destination gate are intercepted; this is not a real OAuth acceptance run.
 const base = new URL(process.argv[2] || 'http://localhost:3100');
 if (base.protocol !== 'http:' || !['localhost', '127.0.0.1', '[::1]'].includes(base.hostname)) throw new Error('Official UI checks require a localhost HTTP server.');
-const output = resolve('.trigger/official-ui/screenshots');
+const alternativesMode = process.argv.includes('--alternatives');
+const output = resolve(alternativesMode ? '.trigger/official-ui/task10-alternatives-screenshots' : '.trigger/official-ui/screenshots');
 await mkdir(output, { recursive: true });
 const browser = await chromium.launch({ channel: 'chrome', headless: true });
 let assertions = 0;
@@ -34,6 +35,18 @@ function detailFrom(template) {
   };
   return data;
 }
+function detailForDisplay(data) {
+  if (!alternativesMode) return data;
+  const result = structuredClone(data);
+  result.officialVerification.alternatives = result.officialVerification.steps.map(step => ({
+    purpose: 'recruitment', stepPurpose: step.purpose, stepId: step.stepId, sourceId: step.sourceId,
+    label: step.label, hostname: step.hostname, relationship: step.purpose === 'listing' ? 'reviewed_delegate' : 'first_party',
+    authorityEvidenceIds: [...new Set(['synthetic-official-evidence-1', ...step.evidenceIds])],
+    reviewedAt: '2026-11-09T08:30:00.000Z', fetchedAt: step.basis === 'reviewed_entry' ? null : stamp,
+    expiresAt: step.expiresAt, basis: step.basis, catalogVersion: step.catalogVersion,
+  }));
+  return result;
+}
 try {
   const fixtureContext = await browser.newContext();
   const response = await fixtureContext.request.get(new URL('/api/scamwin/demo', base).href);
@@ -50,7 +63,8 @@ try {
       if (url.hostname === 'gc.kis.v2.scr.kaspersky-labs.com' && url.pathname.endsWith('/main.js')) return route.fulfill({ contentType: 'application/javascript', body: '// Synthetic UI check: environment script disabled.' });
       if (url.origin !== base.origin) { unexpected.push(url.origin); return route.abort('blockedbyclient'); }
       if (url.pathname === '/api/scamwin/bootstrap') return route.fulfill({ json: { configured: true, user: { name: 'Synthetic browser fixture', sub: 'synthetic-browser-owner' }, role: 'user', readiness: [] } });
-      if (url.pathname === '/api/scamwin/checks/synthetic-official') return route.fulfill({ json: data });
+      if (url.pathname === '/api/scamwin/alerts' && request.method() === 'POST') return route.fulfill({ json: { items: [], nextCursor: null, allResults: false, unreadCount: 0 } });
+      if (url.pathname === '/api/scamwin/checks/synthetic-official') return route.fulfill({ json: detailForDisplay(data) });
       if (url.pathname.startsWith('/api/scamwin/checks/synthetic-official/official-next-step/')) { gateCalls++; return route.fulfill({ contentType: 'text/html', body: '<!doctype html><title>Synthetic gated destination</title><h1>Synthetic gated destination</h1>' }); }
       if (request.method() === 'POST' && url.pathname === '/checks' && request.headers()['next-action']) {
         const saved = structuredClone(data.check); saved.input = { url: '', message: '', promisedBenefit: '', intendedAction: '', images: [], claimedCompany: 'Reference-only Company', offerReference: '12345' };
@@ -82,6 +96,16 @@ try {
     await card.getByText('Published listing found at the checked time.', { exact: true }).waitFor();
     await card.getByText('Reviewed route, not checked live.', { exact: true }).waitFor();
     await card.getByText('Checked live from a public listing.', { exact: true }).waitFor();
+    if (alternativesMode) {
+      expected(await card.getByText('Find a job through reviewed sources', { exact: true }).count(), 2, 'both alternatives state the intended purpose');
+      await card.getByText('Public listing · Reviewed partner route', { exact: true }).waitFor();
+      await card.getByText('Careers · First-party source', { exact: true }).waitFor();
+      expected(await card.getByText('Authority reviewed:', { exact: false }).count(), 2, 'each alternative states its authority review time');
+      await card.getByText('Source fetched:', { exact: false }).waitFor();
+      await card.getByText('No live fetch for this reviewed route.', { exact: true }).waitFor();
+      expected(await card.getByRole('heading', { name: 'Official next step', exact: true }).count(), 1, 'alternatives extend the existing card');
+      await stepKeyboardCheck(card, page);
+    }
     expected(await card.locator('time').count() > 0, true, 'source time is machine-readable');
     expected(await page.getByRole('heading', { name: 'This action carries a high risk.', exact: true }).count(), 1, 'official listing retains high risk');
     const order = await page.evaluate(() => { const hero = document.querySelector('.sw-result-hero'), trace = document.querySelector('.sw-decision-comparison'), verification = document.querySelector('.sw-official-verification'), findings = document.querySelector('.sw-findings'); return [hero, trace, verification, findings].every(Boolean) && !!(hero.compareDocumentPosition(trace) & 4) && !!(trace.compareDocumentPosition(verification) & 4) && !!(verification.compareDocumentPosition(findings) & 4); });
@@ -107,6 +131,7 @@ try {
       for (const [status, freshness, text] of cases) {
         data = detailFrom(template); Object.assign(data.officialVerification.offer, { status }); Object.assign(data.officialVerification, { freshness, steps: [] });
         await page.goto(new URL('/checks/synthetic-official', base).href, { waitUntil: 'domcontentloaded' }); await page.getByText(text, { exact: true }).waitFor();
+        if (alternativesMode) { await card.getByText('No reviewed alternative available.', { exact: false }).waitFor(); expected(await card.locator('a[href*="official-next-step"]').count(), 0, 'uncovered purpose has no alternative destination'); }
         if (status === 'reference_needed') { const newCheck = page.getByRole('link', { name: 'Start a new check with the public reference', exact: true }); expected(await newCheck.getAttribute('href'), '/check', 'missing reference uses clean new-check route'); }
       }
       data = detailFrom(template); data.officialVerification.freshness = 'stale'; data.officialVerification.steps = [];
@@ -119,5 +144,13 @@ try {
     await context.close();
   }
   expected(errors.length, 0, `no page errors: ${errors.join('; ')}`); expected(unexpected.length, 0, `no real external or private traffic: ${unexpected.join('; ')}`);
-  console.log(`Official verification UI: ${assertions} assertions passed. Synthetic sessions only; no real OAuth or source fetch. Screenshots: ${output}`);
+  console.log(`Official verification UI${alternativesMode ? ' (reviewed alternatives)' : ''}: ${assertions} assertions passed. Synthetic sessions only; no real OAuth or source fetch. Screenshots: ${output}`);
 } finally { await browser.close(); }
+
+async function stepKeyboardCheck(card, page) {
+  const link = card.getByRole('link', { name: 'View the public listing', exact: false });
+  await link.focus();
+  expected(await link.evaluate(element => element === document.activeElement), true, 'alternative gate is keyboard focusable');
+  expected(await link.evaluate(element => { const style = getComputedStyle(element); return style.outlineStyle !== 'none' || style.boxShadow !== 'none'; }), true, 'alternative link keeps a visible keyboard focus treatment');
+  await page.keyboard.press('Tab');
+}

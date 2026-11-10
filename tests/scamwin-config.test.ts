@@ -9,6 +9,26 @@ const web = {
   APP_BASE_URL: 'https://demo.example', AUTH0_DOMAIN: 'demo.auth0.com',
   AUTH0_CLIENT_ID: 'client', AUTH0_CLIENT_SECRET: 'client-secret', AUTH0_SECRET: 'secret', DATABASE_URL: 'database',
 };
+test('connected-app readiness validates isolated configuration without claiming live coverage or gating manual checks', () => {
+  const base = {...web, SCAMWIN_INVESTIGATION_BACKEND: 'vercel'};
+  assert.equal(scamwinReadiness(base).readiness.find(item => item.id === 'connected_apps')?.status, 'missing');
+  const enabled = {...base, DATABASE_URL: 'postgresql://test:main@main.example/main', SCAMWIN_CONNECTORS_ENABLED: 'true', SCAMWIN_CONNECTOR_DATABASE_URL: 'postgresql://test:private-db-marker@connectors.example/scamwin_connectors', SCAMWIN_CONNECTOR_ENCRYPTION_KEY: 'a'.repeat(64), SCAMWIN_CONNECTOR_IDENTIFIER_KEY: 'b'.repeat(64), SCAMWIN_CONNECTOR_DISPATCH_SECRET: 'private-dispatch-marker-'.repeat(3)};
+  const result = scamwinReadiness(enabled);
+  assert.equal(result.configured, true);
+  assert.equal(result.readiness.find(item => item.id === 'connected_apps')?.status, 'limited');
+  assert.doesNotMatch(JSON.stringify(result), /private-db-marker|private-dispatch-marker|aaaaaaaaaaaaaaaa/);
+  const invalid = scamwinReadiness({...enabled, SCAMWIN_CONNECTOR_DATABASE_URL: enabled.DATABASE_URL});
+  assert.equal(invalid.configured, true);
+  assert.equal(invalid.readiness.find(item => item.id === 'connected_apps')?.status, 'missing');
+});
+test('the main configuration checker includes disabled/invalid connector status without printing supplied values', () => {
+  const disabled = checkConfig({...web, SCAMWIN_INVESTIGATION_BACKEND: 'vercel'});
+  assert.match(disabled.stdout, /connected apps: disabled/);
+  const invalid = checkConfig({...web, SCAMWIN_INVESTIGATION_BACKEND: 'vercel', SCAMWIN_CONNECTORS_ENABLED: 'true', SCAMWIN_CONNECTOR_DATABASE_URL: 'private-do-not-print'});
+  assert.equal(invalid.status, 1);
+  assert.match(invalid.stdout, /connected apps: invalid/);
+  assert.doesNotMatch(invalid.stdout + invalid.stderr, /private-do-not-print/);
+});
 
 test('Vercel presence readiness accepts an explicitly selected backend without Trigger credentials', () => {
   const result = scamwinReadiness({ ...web, SCAMWIN_INVESTIGATION_BACKEND: 'vercel' });

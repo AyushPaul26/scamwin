@@ -25,10 +25,15 @@ const offerLabels: Record<OfferStatus, string> = {
 const freshnessLabels: Record<FreshnessStatus, string> = { fresh: "Source checked at the time below", stale: "Historical source check", reference_only: "Reviewed reference only", not_checked: "Live source check not completed" };
 const purposeLabels = { listing: "Public listing", careers: "Careers", support: "Support", refund: "Refund help", identity_help: "Identity request help" };
 const basisLabels = { live_listing: "Checked live from a public listing.", live_entry: "Official route checked live.", reviewed_entry: "Reviewed route, not checked live." };
+const alternativePurposeLabels = { recruitment: "Find a job through reviewed sources", recruitment_support: "Verify a recruitment request", shopping: "Shopping", refund: "Refund help", application: "Application help", identity_request: "Identity request help", unknown: "Your purpose" };
 
 export function OfficialVerification({ checkId, verification, observations }: { checkId: string; verification: OfficialVerificationView; observations: readonly Observation[] }) {
   const titleId = useId();
   const { company, destination, offer } = verification;
+  const alternativesEnabled = verification.alternatives !== undefined;
+  const steps = alternativesEnabled
+    ? verification.alternatives!.map(alternative => ({ ...alternative, purpose: alternative.stepPurpose, evidenceIds: alternative.authorityEvidenceIds, alternative }))
+    : verification.steps.map(step => ({ ...step, alternative: undefined }));
   return <section className="sw-section sw-panel sw-official-verification" aria-labelledby={titleId}>
     <div className="sw-section-head"><h2 id={titleId}>Company and offer verification</h2><span className="sw-small-copy">Saved source evidence</span></div>
     <p>Company sources, the submitted destination and the exact offer are separate checks. A published listing does not authenticate the sender or remove action risks.</p>
@@ -41,6 +46,29 @@ export function OfficialVerification({ checkId, verification, observations }: { 
     {verification.explanation && <p className="sw-official-explanation">{verification.explanation}</p>}
     {offer.status === "reference_needed" && <a className="sw-text-link sw-official-new-check" href="/check">Start a new check with the public reference <ArrowRight size={13} aria-hidden="true" /></a>}
     {offer.quote && <blockquote className="sw-decision-quote">“{offer.quote}”</blockquote>}
-    <div className="sw-official-next"><h3>Official next step</h3>{verification.steps.length ? <><p>Use these sources to independently verify the request before paying or sharing information.</p><ul>{verification.steps.map(step => <li key={step.stepId}><div className="sw-official-step-context"><span>{purposeLabels[step.purpose]}</span><strong>{step.hostname}</strong><p>{basisLabels[step.basis]}</p><p className="sw-small-copy">Link available until <time dateTime={step.expiresAt}>{dateLabel(step.expiresAt)}</time></p><EvidenceLinks evidenceIds={step.evidenceIds} observations={observations} /></div><a className="sw-btn sw-btn-outline" href={`/api/scamwin/checks/${encodeURIComponent(checkId)}/official-next-step/${encodeURIComponent(step.stepId)}`} rel="noreferrer">{step.label}<ArrowRight size={14} aria-hidden="true" /></a></li>)}</ul></> : <p>No current official link is available for this check. Find the company through a source you already trust and verify the request independently.</p>}</div>
+    <div className="sw-official-next">
+      <h3>Official next step</h3>
+      {steps.length ? <>
+        <p>Use these sources to independently verify the request before paying or sharing information.</p>
+        {alternativesEnabled && <p>These routes do not authenticate a personal offer or remove the observed payment or information-sharing risks.</p>}
+        <ul>{steps.map(step => <li key={step.stepId}>
+          <div className="sw-official-step-context">
+            <span>{step.alternative ? alternativePurposeLabels[step.alternative.purpose] : purposeLabels[step.purpose]}</span>
+            <strong>{step.hostname}</strong>
+            {step.alternative && <p>{purposeLabels[step.purpose]} · {step.alternative.relationship === "first_party" ? "First-party source" : "Reviewed partner route"}</p>}
+            <p>{basisLabels[step.basis]}</p>
+            {step.alternative && <>
+              <p>Authority reviewed: <time dateTime={step.alternative.reviewedAt}>{dateLabel(step.alternative.reviewedAt)}</time></p>
+              <p>{step.alternative.fetchedAt ? <>Source fetched: <time dateTime={step.alternative.fetchedAt}>{dateLabel(step.alternative.fetchedAt)}</time></> : "No live fetch for this reviewed route."}</p>
+            </>}
+            <p className="sw-small-copy">Link available until <time dateTime={step.expiresAt}>{dateLabel(step.expiresAt)}</time></p>
+            <EvidenceLinks evidenceIds={step.evidenceIds} observations={observations} />
+          </div>
+          <a className="sw-btn sw-btn-outline" href={`/api/scamwin/checks/${encodeURIComponent(checkId)}/official-next-step/${encodeURIComponent(step.stepId)}`} rel="noreferrer">
+            {step.label}<ArrowRight size={14} aria-hidden="true" />
+          </a>
+        </li>)}</ul>
+      </> : <p>{alternativesEnabled ? "No reviewed alternative available. " : "No current official link is available for this check. "}Find the company through a source you already trust and verify the request independently.</p>}
+    </div>
   </section>;
 }

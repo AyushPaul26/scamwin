@@ -74,6 +74,8 @@ Panels use 12px corners, buttons and inputs 6–7px, status labels 5px. Circular
 
 Shared owners are under `components/scamwin`: `core.tsx` owns Shell, Badge, Notice, Empty, Loading, Journey, SearchBox, Confirm, Readiness and access gates. Existing Base UI Button/Input/Dialog and Field primitives are reused. The form uses React Hook Form, Controller and the browser-safe shared Zod schema in `lib/scamwin/input.ts`.
 
+Account uses the same quiet product register: flat provider panels, evidence-blue route selection and plain-text permission readiness. The shared header retains New check, My checks and Shared warnings, adding Connected apps; the account menu and bell lead to canonical account routes. Account navigation wraps on phones and the document retains scroll ownership. Connection and private-event lists use bounded 20-record pages, the shared SearchBox with a unique input ID, and persistent inline feedback. Mode forms reuse Base UI Dialog, Field and RHF; the browser owns the native mode/daily-maximum select popups. Disconnect uses the shared Confirm with connection-specific labels while check deletion keeps its existing labels. Setup, accepted permission and actual processing are separate states; an unavailable provider never displays a successful connection.
+
 Native details expose evidence and the optional company/public-reference fields; native checkboxes express reviewer selection and consent. The intended-action select uses the platform-native popup and explicit action values. No authored select or date input is needed. Native confirmation dialogs are prohibited. App-owned Base UI dialogs preserve focus and Escape behavior. Motion only communicates genuine loading; reduced-motion removes animation and transitions.
 
 ## Do's and Don'ts

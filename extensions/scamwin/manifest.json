@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "Scamwin visible page checks",
+  "version": "0.1.0",
+  "minimum_chrome_version": "120",
+  "description": "Check the current visible page. Optional per-site checks only while your browser is active.",
+  "permissions": ["activeTab", "scripting", "storage"],
+  "host_permissions": ["https://scamwin.vercel.app/*"],
+  "optional_host_permissions": ["https://*/*", "http://*/*"],
+  "background": {"service_worker": "src/background.mjs", "type": "module"},
+  "action": {"default_popup": "src/popup.html", "default_title": "Check with Scamwin"},
+  "content_security_policy": {"extension_pages": "script-src 'self'; object-src 'none'; connect-src https://scamwin.vercel.app"}
+}

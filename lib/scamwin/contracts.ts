@@ -64,11 +64,17 @@ export type PurgeResult = { artifacts: number; checks: number; reviews: number; 
 export type ReviewInput = { decision: "approve" | "reject" | "request_information"; reason: string; expectedRevision: number };
 export type ScamwinRole = "reviewer" | "admin";
 export type CheckPage = { checks: CheckRecord[]; total: number; page: number; pageSize: number };
+/** Trusted recovery metadata only; never returns a deleted body or assessment. */
+export type AdmissionLookup = { status: 'pending' } | { status: 'absent_fenced' } | { status: 'existing'; checkId: string; state: CheckState } | { status: 'terminal_unavailable'; checkId: string; reason: 'deleted' | 'expired' };
 export interface ScamwinStore {
   putLiveView(scope: LiveViewScope, record: LiveViewRecord): Promise<boolean>;
   getLiveView(ownerId: string, checkId: string, expectedRun: { runId: string; generation: number }): Promise<LiveViewRecord | null>;
   updateLiveView(scope: LiveViewScope, sessionId: string, patch: LiveViewPatch): Promise<boolean>;
-  createCheck(ownerId: string, input: CheckInput, submissionKey: string): Promise<CheckRecord>;
+  createCheck(ownerId: string, input: CheckInput, submissionKey: string, admissionDeadlineAt?: string): Promise<CheckRecord>;
+  /** Read-only recovery lookup. Null is ambiguous; this never admits or revives a check. */
+  findCheckBySubmissionKey(ownerId: string, submissionKey: string): Promise<CheckRecord | null>;
+  /** Serialized with createCheck; absence is authoritative only after its immutable insertion deadline. */
+  lookupCheckAdmission(ownerId: string, submissionKey: string, admissionDeadlineAt: string): Promise<AdmissionLookup>;
   getCheck(ownerId: string, id: string): Promise<CheckRecord | null>;
   getInternalCheck(id: string): Promise<CheckRecord | null>;
   listChecks(ownerId: string, options: { page?: number; query?: string }): Promise<CheckPage>;
@@ -92,7 +98,7 @@ export interface ScamwinStore {
   reviewWarning(reviewerId: string, id: string, input: ReviewInput): Promise<WarningSubmission>;
   hasRole(ownerId: string, role: ScamwinRole): Promise<boolean>;
   grantRole(actorId: string, ownerId: string, role: ScamwinRole): Promise<void>;
-  leaseOutbox(limit?: number, kinds?: OutboxJob["kind"][]): Promise<OutboxJob[]>;
+  leaseOutbox(limit?: number, kinds?: OutboxJob["kind"][], aggregateId?: string): Promise<OutboxJob[]>;
   finishOutbox(id: string, expectedAttempt: number, status: "dispatched" | "failed"): Promise<boolean>;
   purgeExpired(): Promise<PurgeResult>;
   retractWarning(reviewerId: string, id: string, input: { reason: string; expectedRevision: number }): Promise<PublicWarning>;

@@ -1,0 +1,9 @@
+'use client';
+import Link from 'next/link';
+import type {UnifiedActivity} from '@/lib/scamwin/connectors/activity-service';
+import type {BoundedPage} from '@/lib/scamwin/connectors/contracts';
+import {connectorStateLabel} from '@/lib/scamwin/connectors/ui';
+import {Badge,Empty,PageHead,dateLabel} from './core';
+import {AccountAccess,PrivateFeedback,PrivatePagination,PrivateToolbar,usePrivatePage} from './private-list';
+export function Activity(){return <><PageHead eyebrow="Your space" title="Activity." description="Bounded connection and coverage events. Queued, quota paused and unsupported remain separate from completed checks."/><AccountAccess><ActivityList/></AccountAccess></>;}
+function ActivityList(){const state=usePrivatePage<BoundedPage<UnifiedActivity>>('activity');return <><PrivateToolbar state={state} label="Search activity kind or reason" filters={[["all","Connected activity"],["manual","Manual check history"],["connection","Connection"],["sync","Sync"],["gap","Coverage gaps"],["job","Checks"]]}/><PrivateFeedback state={state}/>{!state.busy&&state.data&&!state.data.items.length&&<Empty title={state.query||state.filter!=='all'?'No matching activity':'No connection activity yet'}>Events will appear after a connection is used. Activity expires within 90 days.</Empty>}<div className="sw-panel sw-private-records" aria-busy={state.busy}>{state.data?.items.map(a=><article key={a.id}><div className="sw-section-head"><h2>{connectorStateLabel(a.reason)}</h2><Badge value={a.kind}/></div><p>{dateLabel(a.createdAt)} · {a.count} item{a.count===1?'':'s'}</p><Link className="sw-text-link" href={a.checkHref||(a.kind==='connection'?'/account/connections':'/checks')}>{a.kind==='manual'?'Open saved check':a.kind==='connection'?'Manage connected apps':'View My checks'}</Link></article>)}</div><PrivatePagination state={state}/></>;}
