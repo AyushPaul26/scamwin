@@ -3,8 +3,38 @@ import { test } from 'node:test';
 import { z } from 'zod';
 import { requestModelJson, ProviderError, extractOfferIntent } from '../lib/scamwin/ai';
 import { collectWebsite } from '../lib/scamwin/collector';
+import { offerIntentSchema } from '../lib/scamwin/contracts';
 
 const input = { url: 'https://example.com/', message: 'A refund offer', promisedBenefit: 'Receive money', intendedAction: 'receive_money', images: [] };
+
+test('sparse company and posting input sends the exact strict response schema to Workers AI', async () => {
+  const sparseInput = { url: '', message: 'Check Figma posting 5579204004 on its official hiring board.', promisedBenefit: 'A job opportunity at Figma', intendedAction: '', claimedCompany: 'Figma', offerReference: '5579204004', images: [] };
+  const offer = { promisedBenefit: sparseInput.promisedBenefit, claimedOrganization: 'Figma', intendedAction: null, requestedActions: [], extractedCandidates: [{ kind: 'offer_type', value: 'recruitment', sourceRef: 'user_text' }], uncertainties: [] };
+  let calls = 0;
+  const requests: Array<{ response_format?: unknown; messages: Array<{ content: string }> }> = [];
+  const result = await extractOfferIntent(sparseInput, {
+    env: { CLOUDFLARE_ACCOUNT_ID: 'account', CLOUDFLARE_API_TOKEN: 'private' }, allowRepair: false,
+    fetcher: async (_url, init) => {
+      calls++;
+      requests.push(JSON.parse(String(init?.body)));
+      return Response.json({ success: true, result: { response: offer } });
+    },
+  });
+  assert.deepEqual(result, offer);
+  assert.equal(calls, 1);
+  assert.deepEqual(requests[0].response_format, { type: 'json_schema', json_schema: z.toJSONSchema(offerIntentSchema) });
+  assert.match(requests[0].messages[0].content, /omit.*candidate/i);
+});
+
+test('unstated job details returned as null candidates are still rejected without fabricating an intent', async () => {
+  let calls = 0;
+  const invalidOffer = { promisedBenefit: 'A job opportunity at Figma', claimedOrganization: 'Figma', intendedAction: null, requestedActions: [], extractedCandidates: [{ kind: 'offer_type', value: 'recruitment', sourceRef: 'user_text' }, { kind: 'job_location', value: null, sourceRef: 'user_text' }, { kind: 'job_title', value: null, sourceRef: 'user_text' }], uncertainties: [] };
+  await assert.rejects(extractOfferIntent({ ...input, url: '', intendedAction: '', claimedCompany: 'Figma', offerReference: '5579204004' }, {
+    env: { CLOUDFLARE_ACCOUNT_ID: 'account', CLOUDFLARE_API_TOKEN: 'private' }, allowRepair: false,
+    fetcher: async () => { calls++; return Response.json({ success: true, result: { response: `\`\`\`json\n${JSON.stringify(invalidOffer)}\n\`\`\`` } }); },
+  }), (error: unknown) => error instanceof ProviderError && error.code === 'invalid_response');
+  assert.equal(calls, 1);
+});
 
 test('missing AI credentials never calls a provider or fabricates an answer', async () => {
   let called = false;

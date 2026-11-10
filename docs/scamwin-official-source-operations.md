@@ -56,10 +56,10 @@ Official next steps are explicit same-tab links through an authenticated server 
 From the repository root with Node 24, explicitly run:
 
 ```powershell
-node --import tsx scripts/check-scamwin-official-sources.ts --company figma --post 6222861004
+node --import tsx scripts/check-scamwin-official-sources.ts --company figma --post 5579204004
 ```
 
-`6222861004` was a public post linked during the authority review; it is an example, not a guarantee that the listing remains open or accessible. Obtain a current public post ID directly from the reviewed Figma careers route when needed. The CLI accepts one catalogue company ID and one numeric public post ID. It refuses unknown/expired companies, malformed/private references, arbitrary URLs, missing boards and multiple eligible boards **before a reader call**. Entry-only companies are refused by this exact-post CLI even though the application can show their reviewed careers route.
+`5579204004` matched Figma's public listing API during the 10 November 2026 release check; it is an example, not a guarantee that the listing remains open or accessible. The previous example `6222861004` returned 404 during that check. Obtain a current public post ID directly from the reviewed Figma careers route when needed. The CLI accepts one catalogue company ID and one numeric public post ID. It refuses unknown/expired companies, malformed/private references, arbitrary URLs, missing boards and multiple eligible boards **before a reader call**. Entry-only companies are refused by this exact-post CLI even though the application can show their reviewed careers route.
 
 The CLI makes at most **one source check**, using the same native HTTPS reader and normal shared budget. It reads no environment file or credentials, starts no model/browser, connects to no database and makes no application POST. It is independent of the production feature flag. Importing the module does not execute it; tests inject a fictional catalogue, reader and clock.
 
